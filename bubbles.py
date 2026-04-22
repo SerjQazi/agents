@@ -29,17 +29,31 @@ def load_dotenv(path: Path) -> None:
 
 load_dotenv(Path(__file__).with_name(".env"))
 
-DEFAULT_OLLAMA_URL = "http://localhost:11434/api/chat"
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_MODE = "chat"
 
 
-def ollama_chat_url(value: str | None) -> str:
-    url = (value or DEFAULT_OLLAMA_URL).strip() or DEFAULT_OLLAMA_URL
-    if url.rstrip("/").endswith("/api/generate"):
-        return url.rstrip("/")[: -len("/api/generate")] + "/api/chat"
+def normalize_ollama_base_url(value: str | None) -> str:
+    url = (value or DEFAULT_OLLAMA_BASE_URL).strip().rstrip("/")
+    if not url:
+        return DEFAULT_OLLAMA_BASE_URL
+    for suffix in ("/api/chat", "/api/generate"):
+        if url.endswith(suffix):
+            return url[: -len(suffix)] or DEFAULT_OLLAMA_BASE_URL
     return url
 
 
-OLLAMA_URL = ollama_chat_url(os.getenv("OLLAMA_URL"))
+def ollama_endpoint_url(endpoint: str, configured_url: str | None = None, configured_base_url: str | None = None) -> str:
+    if endpoint not in {"chat", "generate"}:
+        raise ValueError("Ollama endpoint must be chat or generate.")
+    base_url = normalize_ollama_base_url(configured_base_url or configured_url)
+    return f"{base_url}/api/{endpoint}"
+
+
+OLLAMA_BASE_URL = normalize_ollama_base_url(os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_URL"))
+OLLAMA_CHAT_URL = ollama_endpoint_url("chat", configured_base_url=OLLAMA_BASE_URL)
+OLLAMA_GENERATE_URL = ollama_endpoint_url("generate", configured_base_url=OLLAMA_BASE_URL)
+OLLAMA_URL = OLLAMA_CHAT_URL
 MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 
 ALLOWED_USER_ID_TEXT = os.getenv("BUBBLES_ALLOWED_USER_ID", "").strip()
@@ -360,24 +374,202 @@ def build_ollama_messages(user_id: int, user_input: str) -> list[dict[str, str]]
     return messages
 
 
-def ask_ollama(user_id: int, user_input: str) -> str:
+def build_ollama_generate_prompt(user_id: int, user_input: str) -> str:
+    lines = [
+        "System:",
+        SYSTEM_PROMPT,
+        "",
+        "Conversation:",
+    ]
+    for item in CHAT_MEMORY.get(user_id, []):
+        role = item.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        label = "User" if role == "user" else "Assistant"
+        lines.append(f"{label}: {item.get('content', '')}")
+    lines.extend([f"User: {user_input}", "Assistant:"])
+    return "\n".join(lines)
+
+
+def parse_ollama_response(data: dict) -> str:
+    message = data.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    response = data.get("response")
+    if isinstance(response, str) and response.strip():
+        return response.strip()
+    return "No response from Ollama."
+
+
+def post_ollama_chat(user_id: int, user_input: str):
     messages = build_ollama_messages(user_id, user_input)
+    return requests.post(
+        OLLAMA_CHAT_URL,
+        json={
+            "model": MODEL,
+            "messages": messages,
+            "stream": False,
+        },
+        timeout=120,
+    )
+
+
+def post_ollama_generate(user_id: int, user_input: str):
+    return requests.post(
+        OLLAMA_GENERATE_URL,
+        json={
+            "model": MODEL,
+            "prompt": build_ollama_generate_prompt(user_id, user_input),
+            "stream": False,
+        },
+        timeout=120,
+    )
+
+
+def ollama_model_names(tags_data: dict) -> set[str]:
+    models = tags_data.get("models", [])
+    if not isinstance(models, list):
+        return set()
+    names = set()
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        name = model.get("name")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
+
+
+def ollama_check_get_tags(timeout: int = 5) -> dict:
     try:
-        response = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": MODEL,
-                "messages": messages,
-                "stream": False,
-            },
-            timeout=120
-        )
+        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=timeout)
+        status_code = response.status_code
         response.raise_for_status()
         data = response.json()
-        message = data.get("message", {})
-        return message.get("content", "").strip() or "No response from Ollama."
+        return {
+            "ok": True,
+            "status_code": status_code,
+            "models": sorted(ollama_model_names(data)),
+        }
+    except requests.RequestException as e:
+        status_code = getattr(getattr(e, "response", None), "status_code", None)
+        return {"ok": False, "status_code": status_code, "error": e.__class__.__name__}
+    except ValueError:
+        return {"ok": False, "status_code": status_code, "error": "Invalid JSON"}
+
+
+def ollama_check_generate(timeout: int = 5) -> dict:
+    try:
+        response = requests.post(
+            OLLAMA_GENERATE_URL,
+            json={"model": MODEL, "prompt": "ping", "stream": False},
+            timeout=timeout,
+        )
+        status_code = response.status_code
+        response.raise_for_status()
+        return {"ok": True, "status_code": status_code}
+    except requests.RequestException as e:
+        status_code = getattr(getattr(e, "response", None), "status_code", None)
+        if status_code is None and "response" in locals():
+            status_code = response.status_code
+        return {"ok": False, "status_code": status_code, "error": e.__class__.__name__}
+
+
+def ollama_check_chat(timeout: int = 5) -> dict:
+    try:
+        response = requests.post(
+            OLLAMA_CHAT_URL,
+            json={"model": MODEL, "messages": [{"role": "user", "content": "ping"}], "stream": False},
+            timeout=timeout,
+        )
+        status_code = response.status_code
+        response.raise_for_status()
+        return {"ok": True, "status_code": status_code}
+    except requests.RequestException as e:
+        status_code = getattr(getattr(e, "response", None), "status_code", None)
+        if status_code is None and "response" in locals():
+            status_code = response.status_code
+        return {"ok": False, "status_code": status_code, "error": e.__class__.__name__}
+
+
+def ollama_diagnostics(timeout: int = 5) -> dict:
+    tags = ollama_check_get_tags(timeout)
+    model_installed = MODEL in set(tags.get("models", [])) if tags.get("ok") else False
+    generate = ollama_check_generate(timeout)
+    chat = ollama_check_chat(timeout)
+    return {
+        "base_url": OLLAMA_BASE_URL,
+        "model": MODEL,
+        "tags": tags,
+        "model_installed": model_installed,
+        "generate": generate,
+        "chat": chat,
+    }
+
+
+def format_ollama_check_result(result: dict) -> str:
+    if result.get("ok"):
+        return f"ok ({result.get('status_code')})"
+    status_code = result.get("status_code")
+    error = result.get("error") or "failed"
+    if status_code is not None:
+        return f"failed ({status_code}, {error})"
+    return f"failed ({error})"
+
+
+def print_ollama_diagnostics(diagnostics: dict) -> None:
+    print(f"Ollama base URL: {diagnostics['base_url']}")
+    print(f"Ollama model: {diagnostics['model']}")
+    print(f"Ollama GET /api/tags: {format_ollama_check_result(diagnostics['tags'])}")
+    if diagnostics["tags"].get("ok"):
+        installed = "yes" if diagnostics["model_installed"] else "no"
+        print(f"Ollama model installed: {installed}")
+        if not diagnostics["model_installed"]:
+            print(f"Model {MODEL} is not installed. Run: ollama pull {MODEL}")
+    else:
+        print(
+            "Ollama is not reachable at this URL. Check whether Bubbles is running on SSH/remote "
+            "and whether Ollama is running on that same machine."
+        )
+    print(f"Ollama POST /api/generate: {format_ollama_check_result(diagnostics['generate'])}")
+    print(f"Ollama POST /api/chat: {format_ollama_check_result(diagnostics['chat'])}")
+
+
+def configure_ollama_mode(timeout: int = 5) -> str:
+    global OLLAMA_MODE
+    diagnostics = ollama_diagnostics(timeout)
+    print_ollama_diagnostics(diagnostics)
+
+    if diagnostics["chat"].get("ok"):
+        OLLAMA_MODE = "chat"
+    elif diagnostics["generate"].get("ok"):
+        OLLAMA_MODE = "generate"
+    else:
+        OLLAMA_MODE = "generate"
+
+    return OLLAMA_MODE
+
+
+def ask_ollama(user_id: int, user_input: str) -> str:
+    global OLLAMA_MODE
+    try:
+        if OLLAMA_MODE == "chat":
+            response = post_ollama_chat(user_id, user_input)
+            if response.status_code == 404:
+                OLLAMA_MODE = "generate"
+                print("Ollama /api/chat returned 404 during chat; switching to generate fallback.")
+                response = post_ollama_generate(user_id, user_input)
+        else:
+            response = post_ollama_generate(user_id, user_input)
+
+        response.raise_for_status()
+        data = response.json()
+        return parse_ollama_response(data)
     except Exception as e:
-        return f"❌ Ollama error: {e}"
+        print(f"Ollama request failed: {e}")
+        return "I can handle calendar commands, but my chat brain is offline. Check Ollama setup."
 
 
 def run_command(cmd: list[str]) -> str:
@@ -1858,6 +2050,13 @@ def main():
     if ALLOWED_USER_ID is None:
         raise RuntimeError("Missing BUBBLES_ALLOWED_USER_ID. Add your Telegram numeric user ID to .env.")
 
+    mode = configure_ollama_mode()
+    mode_label = "chat" if mode == "chat" else "generate fallback"
+    endpoint = OLLAMA_CHAT_URL if mode == "chat" else OLLAMA_GENERATE_URL
+    print(f"Ollama model: {MODEL}")
+    print(f"Ollama mode: {mode_label}")
+    print(f"Ollama endpoint: {endpoint}")
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
@@ -1874,7 +2073,7 @@ def main():
     app.add_handler(CommandHandler("write", write_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print(f"🤖 Bubbles (@bubbles_sys_bot) is running with Ollama model {MODEL} at {OLLAMA_URL}.")
+    print("🤖 Bubbles (@bubbles_sys_bot) is running.")
     app.run_polling()
 
 

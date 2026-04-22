@@ -72,23 +72,31 @@ class BubblesCalendarParsingTests(unittest.TestCase):
         self.assertEqual(messages[1], {"role": "user", "content": "remember this"})
         self.assertEqual(messages[2], {"role": "user", "content": "hello"})
 
-    def test_ollama_generate_url_is_normalized_to_chat(self):
+    def test_ollama_endpoint_urls_allow_base_or_endpoint_config(self):
         self.assertEqual(
-            bubbles.ollama_chat_url("http://localhost:11434/api/generate"),
+            bubbles.ollama_endpoint_url("chat", configured_url="http://localhost:11434/api/generate"),
             "http://localhost:11434/api/chat",
         )
         self.assertEqual(
-            bubbles.ollama_chat_url("http://localhost:11434/api/chat"),
+            bubbles.ollama_endpoint_url("generate", configured_url="http://localhost:11434/api/chat"),
+            "http://localhost:11434/api/generate",
+        )
+        self.assertEqual(
+            bubbles.ollama_endpoint_url("chat", configured_base_url="http://localhost:11434"),
             "http://localhost:11434/api/chat",
         )
 
     def test_ask_ollama_uses_chat_payload(self):
         original_post = bubbles.requests.post
-        original_url = bubbles.OLLAMA_URL
+        original_mode = bubbles.OLLAMA_MODE
+        original_chat_url = bubbles.OLLAMA_CHAT_URL
+        original_generate_url = bubbles.OLLAMA_GENERATE_URL
         original_model = bubbles.MODEL
         calls = []
 
         class FakeResponse:
+            status_code = 200
+
             def raise_for_status(self):
                 return None
 
@@ -100,14 +108,18 @@ class BubblesCalendarParsingTests(unittest.TestCase):
             return FakeResponse()
 
         bubbles.requests.post = fake_post
-        bubbles.OLLAMA_URL = "http://localhost:11434/api/chat"
+        bubbles.OLLAMA_MODE = "chat"
+        bubbles.OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
+        bubbles.OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
         bubbles.MODEL = "qwen3:8b"
         bubbles.CHAT_MEMORY[123] = [{"role": "assistant", "content": "previous"}]
         try:
             reply = bubbles.ask_ollama(123, "hello")
         finally:
             bubbles.requests.post = original_post
-            bubbles.OLLAMA_URL = original_url
+            bubbles.OLLAMA_MODE = original_mode
+            bubbles.OLLAMA_CHAT_URL = original_chat_url
+            bubbles.OLLAMA_GENERATE_URL = original_generate_url
             bubbles.MODEL = original_model
 
         self.assertEqual(reply, "hi")
@@ -117,6 +129,129 @@ class BubblesCalendarParsingTests(unittest.TestCase):
         self.assertNotIn("prompt", calls[0]["json"])
         self.assertEqual(calls[0]["json"]["messages"][0]["role"], "system")
         self.assertEqual(calls[0]["json"]["messages"][-1], {"role": "user", "content": "hello"})
+
+    def test_ask_ollama_falls_back_to_generate_on_chat_404(self):
+        original_post = bubbles.requests.post
+        original_mode = bubbles.OLLAMA_MODE
+        original_chat_url = bubbles.OLLAMA_CHAT_URL
+        original_generate_url = bubbles.OLLAMA_GENERATE_URL
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.payload = payload
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise bubbles.requests.HTTPError(f"HTTP {self.status_code}", response=self)
+
+            def json(self):
+                return self.payload
+
+        def fake_post(url, json, timeout):
+            calls.append({"url": url, "json": json, "timeout": timeout})
+            if url.endswith("/api/chat"):
+                return FakeResponse(404, {})
+            return FakeResponse(200, {"response": "fallback reply"})
+
+        bubbles.requests.post = fake_post
+        bubbles.OLLAMA_MODE = "chat"
+        bubbles.OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
+        bubbles.OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
+        bubbles.CHAT_MEMORY[123] = [{"role": "assistant", "content": "previous"}]
+        try:
+            reply = bubbles.ask_ollama(123, "hello")
+        finally:
+            bubbles.requests.post = original_post
+            bubbles.OLLAMA_MODE = original_mode
+            bubbles.OLLAMA_CHAT_URL = original_chat_url
+            bubbles.OLLAMA_GENERATE_URL = original_generate_url
+
+        self.assertEqual(reply, "fallback reply")
+        self.assertEqual(calls[0]["url"], "http://localhost:11434/api/chat")
+        self.assertEqual(calls[1]["url"], "http://localhost:11434/api/generate")
+        self.assertIn("prompt", calls[1]["json"])
+        self.assertIn("System:", calls[1]["json"]["prompt"])
+        self.assertIn("Assistant: previous", calls[1]["json"]["prompt"])
+        self.assertIn("User: hello", calls[1]["json"]["prompt"])
+
+    def test_ask_ollama_uses_friendly_error_when_offline(self):
+        original_post = bubbles.requests.post
+        original_mode = bubbles.OLLAMA_MODE
+
+        def fake_post(*args, **kwargs):
+            raise RuntimeError("raw url failure")
+
+        bubbles.requests.post = fake_post
+        bubbles.OLLAMA_MODE = "generate"
+        try:
+            reply = bubbles.ask_ollama(123, "hello")
+        finally:
+            bubbles.requests.post = original_post
+            bubbles.OLLAMA_MODE = original_mode
+
+        self.assertEqual(reply, "I can handle calendar commands, but my chat brain is offline. Check Ollama setup.")
+        self.assertNotIn("raw url", reply)
+
+    def test_configure_ollama_mode_uses_generate_fallback_when_chat_404(self):
+        original_get = bubbles.requests.get
+        original_post = bubbles.requests.post
+        original_mode = bubbles.OLLAMA_MODE
+
+        class FakeResponse:
+            def __init__(self, status_code, payload=None):
+                self.status_code = status_code
+                self.payload = payload or {}
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise bubbles.requests.HTTPError(f"HTTP {self.status_code}", response=self)
+
+            def json(self):
+                return self.payload
+
+        def fake_post(url, *args, **kwargs):
+            if url.endswith("/api/generate"):
+                return FakeResponse(200)
+            return FakeResponse(404)
+
+        bubbles.requests.get = lambda *args, **kwargs: FakeResponse(200, {"models": [{"name": "qwen3:8b"}]})
+        bubbles.requests.post = fake_post
+        try:
+            mode = bubbles.configure_ollama_mode()
+        finally:
+            bubbles.requests.get = original_get
+            bubbles.requests.post = original_post
+            bubbles.OLLAMA_MODE = original_mode
+
+        self.assertEqual(mode, "generate")
+
+    def test_ollama_diagnostics_reports_tags_and_model_status(self):
+        original_get = bubbles.requests.get
+        original_post = bubbles.requests.post
+
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"models": [{"name": "qwen3:8b"}]}
+
+        bubbles.requests.get = lambda *args, **kwargs: FakeResponse()
+        bubbles.requests.post = lambda *args, **kwargs: FakeResponse()
+        try:
+            diagnostics = bubbles.ollama_diagnostics()
+        finally:
+            bubbles.requests.get = original_get
+            bubbles.requests.post = original_post
+
+        self.assertTrue(diagnostics["tags"]["ok"])
+        self.assertTrue(diagnostics["model_installed"])
+        self.assertTrue(diagnostics["generate"]["ok"])
+        self.assertTrue(diagnostics["chat"]["ok"])
 
     def test_reminder_offsets_parse_natural_replies(self):
         cases = {
