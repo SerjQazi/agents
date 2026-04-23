@@ -1,9 +1,12 @@
 import json
 import os
+import platform
 import re
 import requests
 import subprocess
 import sys
+from base64 import urlsafe_b64decode
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -30,7 +33,18 @@ def load_dotenv(path: Path) -> None:
 load_dotenv(Path(__file__).with_name(".env"))
 
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+DEFAULT_OLLAMA_MODEL = "llama3.2:3b"
+STALE_OLLAMA_MODELS = {"qwen3:8b"}
 OLLAMA_MODE = "chat"
+OLLAMA_CONNECT_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_CONNECT_TIMEOUT", "5"))
+OLLAMA_READ_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_READ_TIMEOUT", "30"))
+OLLAMA_COOLDOWN_SECONDS = int(os.getenv("OLLAMA_COOLDOWN_SECONDS", "60"))
+OLLAMA_HEALTH_TIMEOUT_SECONDS = 3
+OLLAMA_REQUEST_TIMEOUT = (OLLAMA_CONNECT_TIMEOUT_SECONDS, OLLAMA_READ_TIMEOUT_SECONDS)
+OLLAMA_MAX_HISTORY_TURNS = int(os.getenv("OLLAMA_MAX_HISTORY_TURNS", "2"))
+OLLAMA_HISTORY_LIMIT = OLLAMA_MAX_HISTORY_TURNS * 2
+OLLAMA_MESSAGE_CHAR_LIMIT = 750
+OLLAMA_PROMPT_CHAR_LIMIT = int(os.getenv("OLLAMA_MAX_PROMPT_CHARS", "1400"))
 
 
 def normalize_ollama_base_url(value: str | None) -> str:
@@ -54,7 +68,16 @@ OLLAMA_BASE_URL = normalize_ollama_base_url(os.getenv("OLLAMA_BASE_URL") or os.g
 OLLAMA_CHAT_URL = ollama_endpoint_url("chat", configured_base_url=OLLAMA_BASE_URL)
 OLLAMA_GENERATE_URL = ollama_endpoint_url("generate", configured_base_url=OLLAMA_BASE_URL)
 OLLAMA_URL = OLLAMA_CHAT_URL
-MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+
+
+def selected_ollama_model() -> str:
+    configured = os.getenv("OLLAMA_MODEL", "").strip()
+    if configured and configured not in STALE_OLLAMA_MODELS:
+        return configured
+    return DEFAULT_OLLAMA_MODEL
+
+
+MODEL = selected_ollama_model()
 
 ALLOWED_USER_ID_TEXT = os.getenv("BUBBLES_ALLOWED_USER_ID", "").strip()
 ALLOWED_USER_ID = int(ALLOWED_USER_ID_TEXT) if ALLOWED_USER_ID_TEXT.isdigit() else None
@@ -66,14 +89,20 @@ GOOGLE_CALENDAR_TIMEZONE = os.getenv("GOOGLE_CALENDAR_TIMEZONE", "America/Toront
 MEMORY_PATH = Path(os.getenv("BUBBLES_MEMORY_PATH", "memory.json"))
 BUBBLES_ENABLE_DEV_COMMANDS = os.getenv("BUBBLES_ENABLE_DEV_COMMANDS", "").strip().lower() in {"1", "true", "yes", "on"}
 CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
+GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GOOGLE_OAUTH_SCOPES = CALENDAR_SCOPES + [GMAIL_READONLY_SCOPE]
+GMAIL_FETCH_LIMIT = max(1, min(int(os.getenv("GMAIL_FETCH_LIMIT", "10")), 25))
+GMAIL_QUERY = os.getenv("GMAIL_QUERY", "newer_than:2d")
 REMINDER_MINUTES = [10, 30, 60, 24 * 60, 7 * 24 * 60]
 PENDING_EVENTS: dict[int, dict] = {}
+PENDING_EMAIL_APPOINTMENTS: list[dict] = []
+TODAY_IMPORTANT_EMAILS: list[dict] = []
+SCANNED_EMAIL_IDS: set[str] = set()
 CHAT_MEMORY: dict[int, list[dict[str, str]]] = {}
-SYSTEM_PROMPT = (
-    "You are Bubbles, my personal Telegram assistant. Reply naturally and keep answers short. "
-    "The bot has local tools for calendar, files, and system checks; never claim you lack access "
-    "when the code can handle the task. For tool tasks, assume the code has already handled them."
-)
+LAST_OLLAMA_HEALTH: dict | None = None
+OLLAMA_OFFLINE_UNTIL: float = 0
+OLLAMA_LAST_ERROR: str = ""
+SYSTEM_PROMPT = "You are Bubbles, a concise Telegram assistant. Reply briefly."
 try:
     LOCAL_TZ = ZoneInfo(GOOGLE_CALENDAR_TIMEZONE)
 except ZoneInfoNotFoundError:
@@ -210,6 +239,31 @@ def remember_message(user_id: int, role: str, content: str) -> None:
     history = CHAT_MEMORY.setdefault(user_id, [])
     history.append({"role": role, "content": content})
     del history[:-10]
+
+
+def cap_text(value: str, limit: int) -> str:
+    text = value or ""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 15].rstrip() + "\n[truncated]"
+
+
+def include_in_ollama_history(item: dict[str, str]) -> bool:
+    if item.get("role") != "assistant":
+        return True
+    content = item.get("content", "")
+    blocked_markers = (
+        "Upcoming calendar events",
+        "Next appointment",
+        "Next available day",
+        "Calendar event added",
+        "Calendar error",
+        "System Status",
+        "Uptime:",
+        "RAM:",
+        "Disk:",
+    )
+    return not any(marker in content for marker in blocked_markers)
 
 
 def load_memory() -> dict:
@@ -365,12 +419,14 @@ def parse_memory_fact(value: str) -> tuple[str, str] | None:
 
 def build_ollama_messages(user_id: int, user_input: str) -> list[dict[str, str]]:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for item in CHAT_MEMORY.get(user_id, []):
+    for item in CHAT_MEMORY.get(user_id, [])[-OLLAMA_HISTORY_LIMIT:]:
+        if not include_in_ollama_history(item):
+            continue
         role = item.get("role")
         if role not in {"user", "assistant"}:
             continue
-        messages.append({"role": role, "content": item.get("content", "")})
-    messages.append({"role": "user", "content": user_input})
+        messages.append({"role": role, "content": cap_text(item.get("content", ""), OLLAMA_MESSAGE_CHAR_LIMIT)})
+    messages.append({"role": "user", "content": cap_text(user_input, OLLAMA_MESSAGE_CHAR_LIMIT)})
     return messages
 
 
@@ -381,14 +437,16 @@ def build_ollama_generate_prompt(user_id: int, user_input: str) -> str:
         "",
         "Conversation:",
     ]
-    for item in CHAT_MEMORY.get(user_id, []):
+    for item in CHAT_MEMORY.get(user_id, [])[-OLLAMA_HISTORY_LIMIT:]:
+        if not include_in_ollama_history(item):
+            continue
         role = item.get("role")
         if role not in {"user", "assistant"}:
             continue
         label = "User" if role == "user" else "Assistant"
-        lines.append(f"{label}: {item.get('content', '')}")
-    lines.extend([f"User: {user_input}", "Assistant:"])
-    return "\n".join(lines)
+        lines.append(f"{label}: {cap_text(item.get('content', ''), OLLAMA_MESSAGE_CHAR_LIMIT)}")
+    lines.extend([f"User: {cap_text(user_input, OLLAMA_MESSAGE_CHAR_LIMIT)}", "Assistant:"])
+    return cap_text("\n".join(lines), OLLAMA_PROMPT_CHAR_LIMIT)
 
 
 def parse_ollama_response(data: dict) -> str:
@@ -411,8 +469,9 @@ def post_ollama_chat(user_id: int, user_input: str):
             "model": MODEL,
             "messages": messages,
             "stream": False,
+            "options": {"num_predict": 64},
         },
-        timeout=120,
+        timeout=OLLAMA_REQUEST_TIMEOUT,
     )
 
 
@@ -423,8 +482,9 @@ def post_ollama_generate(user_id: int, user_input: str):
             "model": MODEL,
             "prompt": build_ollama_generate_prompt(user_id, user_input),
             "stream": False,
+            "options": {"num_predict": 64},
         },
-        timeout=120,
+        timeout=OLLAMA_REQUEST_TIMEOUT,
     )
 
 
@@ -442,7 +502,7 @@ def ollama_model_names(tags_data: dict) -> set[str]:
     return names
 
 
-def ollama_check_get_tags(timeout: int = 5) -> dict:
+def ollama_check_get_tags(timeout: int | float = OLLAMA_HEALTH_TIMEOUT_SECONDS) -> dict:
     try:
         response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=timeout)
         status_code = response.status_code
@@ -460,7 +520,7 @@ def ollama_check_get_tags(timeout: int = 5) -> dict:
         return {"ok": False, "status_code": status_code, "error": "Invalid JSON"}
 
 
-def ollama_check_generate(timeout: int = 5) -> dict:
+def ollama_check_generate(timeout: int | float = OLLAMA_HEALTH_TIMEOUT_SECONDS) -> dict:
     try:
         response = requests.post(
             OLLAMA_GENERATE_URL,
@@ -477,7 +537,7 @@ def ollama_check_generate(timeout: int = 5) -> dict:
         return {"ok": False, "status_code": status_code, "error": e.__class__.__name__}
 
 
-def ollama_check_chat(timeout: int = 5) -> dict:
+def ollama_check_chat(timeout: int | float = OLLAMA_HEALTH_TIMEOUT_SECONDS) -> dict:
     try:
         response = requests.post(
             OLLAMA_CHAT_URL,
@@ -494,19 +554,19 @@ def ollama_check_chat(timeout: int = 5) -> dict:
         return {"ok": False, "status_code": status_code, "error": e.__class__.__name__}
 
 
-def ollama_diagnostics(timeout: int = 5) -> dict:
+def ollama_diagnostics(timeout: int | float = OLLAMA_HEALTH_TIMEOUT_SECONDS, include_post: bool = False) -> dict:
     tags = ollama_check_get_tags(timeout)
     model_installed = MODEL in set(tags.get("models", [])) if tags.get("ok") else False
-    generate = ollama_check_generate(timeout)
-    chat = ollama_check_chat(timeout)
-    return {
+    diagnostics = {
         "base_url": OLLAMA_BASE_URL,
         "model": MODEL,
         "tags": tags,
         "model_installed": model_installed,
-        "generate": generate,
-        "chat": chat,
     }
+    if include_post:
+        diagnostics["generate"] = ollama_check_generate(timeout)
+        diagnostics["chat"] = ollama_check_chat(timeout)
+    return diagnostics
 
 
 def format_ollama_check_result(result: dict) -> str:
@@ -517,6 +577,32 @@ def format_ollama_check_result(result: dict) -> str:
     if status_code is not None:
         return f"failed ({status_code}, {error})"
     return f"failed ({error})"
+
+
+def current_timestamp() -> float:
+    return datetime.now(timezone.utc).timestamp()
+
+
+def ollama_cooldown_remaining(now: float | None = None) -> int:
+    current = current_timestamp() if now is None else now
+    return max(0, int(OLLAMA_OFFLINE_UNTIL - current))
+
+
+def ollama_brain_state(now: float | None = None) -> str:
+    return "cooldown" if ollama_cooldown_remaining(now) > 0 else "online"
+
+
+def mark_ollama_offline(error_type: str, now: float | None = None) -> None:
+    global OLLAMA_OFFLINE_UNTIL
+    global OLLAMA_LAST_ERROR
+    current = current_timestamp() if now is None else now
+    OLLAMA_OFFLINE_UNTIL = current + OLLAMA_COOLDOWN_SECONDS
+    OLLAMA_LAST_ERROR = error_type
+
+
+def mark_ollama_online() -> None:
+    global OLLAMA_OFFLINE_UNTIL
+    OLLAMA_OFFLINE_UNTIL = 0
 
 
 def print_ollama_diagnostics(diagnostics: dict) -> None:
@@ -533,27 +619,45 @@ def print_ollama_diagnostics(diagnostics: dict) -> None:
             "Ollama is not reachable at this URL. Check whether Bubbles is running on SSH/remote "
             "and whether Ollama is running on that same machine."
         )
-    print(f"Ollama POST /api/generate: {format_ollama_check_result(diagnostics['generate'])}")
-    print(f"Ollama POST /api/chat: {format_ollama_check_result(diagnostics['chat'])}")
+    if "generate" in diagnostics:
+        print(f"Ollama POST /api/generate: {format_ollama_check_result(diagnostics['generate'])}")
+    if "chat" in diagnostics:
+        print(f"Ollama POST /api/chat: {format_ollama_check_result(diagnostics['chat'])}")
 
 
-def configure_ollama_mode(timeout: int = 5) -> str:
+def service_status_text(diagnostics: dict | None = None) -> str:
+    diagnostics = diagnostics or ollama_diagnostics(OLLAMA_HEALTH_TIMEOUT_SECONDS)
+    ollama_reachable = "yes" if diagnostics["tags"].get("ok") else "no"
+    model_installed = "yes" if diagnostics.get("model_installed") else "no"
+    gmail_status = "yes" if gmail_configured() else "no"
+    calendar_status = "yes" if calendar_configured() else "no"
+    return (
+        "Bubbles status\n"
+        f"Ollama reachable: {ollama_reachable}\n"
+        f"Selected model: {MODEL}\n"
+        f"Model installed: {model_installed}\n"
+        f"Gmail configured: {gmail_status}\n"
+        f"Calendar configured: {calendar_status}"
+    )
+
+
+def configure_ollama_mode(timeout: int | float = OLLAMA_HEALTH_TIMEOUT_SECONDS) -> str:
     global OLLAMA_MODE
+    global LAST_OLLAMA_HEALTH
     diagnostics = ollama_diagnostics(timeout)
+    LAST_OLLAMA_HEALTH = diagnostics
     print_ollama_diagnostics(diagnostics)
-
-    if diagnostics["chat"].get("ok"):
-        OLLAMA_MODE = "chat"
-    elif diagnostics["generate"].get("ok"):
-        OLLAMA_MODE = "generate"
-    else:
-        OLLAMA_MODE = "generate"
+    OLLAMA_MODE = "chat"
+    print("Ollama endpoint selection: lazy chat; generate fallback on /api/chat 404.")
 
     return OLLAMA_MODE
 
 
 def ask_ollama(user_id: int, user_input: str) -> str:
     global OLLAMA_MODE
+    if ollama_cooldown_remaining() > 0:
+        return "I’m a bit overloaded right now. Please try again in a moment."
+
     try:
         if OLLAMA_MODE == "chat":
             response = post_ollama_chat(user_id, user_input)
@@ -566,8 +670,15 @@ def ask_ollama(user_id: int, user_input: str) -> str:
 
         response.raise_for_status()
         data = response.json()
+        mark_ollama_online()
         return parse_ollama_response(data)
+    except requests.Timeout as e:
+        mark_ollama_offline(e.__class__.__name__)
+        print(f"Ollama request timed out: {e.__class__.__name__}; cooling down for {OLLAMA_COOLDOWN_SECONDS}s.")
+        return "I’m a bit overloaded right now. Please try again in a moment."
     except Exception as e:
+        global OLLAMA_LAST_ERROR
+        OLLAMA_LAST_ERROR = e.__class__.__name__
         print(f"Ollama request failed: {e}")
         return "I can handle calendar commands, but my chat brain is offline. Check Ollama setup."
 
@@ -588,14 +699,26 @@ def run_command(cmd: list[str]) -> str:
         return f"❌ Error: {e}"
 
 
-def token_has_calendar_scopes(path: Path) -> bool:
+def token_scopes(path: Path) -> set[str]:
     try:
         token_data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return False
+        return set()
+    scopes = token_data.get("scopes", [])
+    if isinstance(scopes, str):
+        return set(scopes.split())
+    return set(scopes)
 
-    granted_scopes = set(token_data.get("scopes", []))
+
+def token_has_calendar_scopes(path: Path) -> bool:
+    granted_scopes = token_scopes(path)
     return all(scope in granted_scopes for scope in CALENDAR_SCOPES)
+
+
+def token_has_google_oauth_scopes(path: Path) -> bool:
+    granted_scopes = token_scopes(path)
+    return all(scope in granted_scopes for scope in GOOGLE_OAUTH_SCOPES)
+
 
 
 def get_calendar_service():
@@ -611,7 +734,8 @@ def get_calendar_service():
 
     creds = None
     if GOOGLE_TOKEN_PATH.exists() and token_has_calendar_scopes(GOOGLE_TOKEN_PATH):
-        creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN_PATH), CALENDAR_SCOPES)
+        scopes = GOOGLE_OAUTH_SCOPES if token_has_google_oauth_scopes(GOOGLE_TOKEN_PATH) else CALENDAR_SCOPES
+        creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN_PATH), scopes)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -643,10 +767,488 @@ def setup_google_calendar_auth() -> str:
             "JSON file from Google Cloud and save it there."
         )
 
-    flow = InstalledAppFlow.from_client_secrets_file(str(GOOGLE_CREDENTIALS_PATH), CALENDAR_SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(str(GOOGLE_CREDENTIALS_PATH), GOOGLE_OAUTH_SCOPES)
     creds = flow.run_local_server(port=0)
     GOOGLE_TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
-    return f"Google Calendar authorized. Token saved to {GOOGLE_TOKEN_PATH}."
+    return f"Google Calendar and Gmail readonly access authorized. Token saved to {GOOGLE_TOKEN_PATH}."
+
+
+def token_has_scope(path: Path, scope: str) -> bool:
+    return scope in token_scopes(path)
+
+
+def google_reauth_instructions() -> str:
+    return f"Delete {GOOGLE_TOKEN_PATH}, run python3 bubbles.py --google-auth, then complete Google OAuth again."
+
+
+def gmail_configuration_issue() -> str:
+    if os.getenv("GMAIL_ACCESS_TOKEN", "").strip() or os.getenv("GMAIL_TOKEN", "").strip():
+        return ""
+    if not GOOGLE_TOKEN_PATH.exists():
+        return (
+            f"{GOOGLE_TOKEN_PATH} is missing. Run python3 bubbles.py --google-auth and complete Google OAuth."
+        )
+    if not token_has_scope(GOOGLE_TOKEN_PATH, GMAIL_READONLY_SCOPE):
+        return (
+            f"{GOOGLE_TOKEN_PATH} is present, but Gmail readonly scope is missing. "
+            + google_reauth_instructions()
+        )
+    return ""
+
+
+def gmail_configured() -> bool:
+    return gmail_configuration_issue() == ""
+
+
+def calendar_configured() -> bool:
+    return GOOGLE_TOKEN_PATH.exists() and token_has_calendar_scopes(GOOGLE_TOKEN_PATH)
+
+
+def gmail_status_text() -> str:
+    credentials_exists = "yes" if GOOGLE_CREDENTIALS_PATH.exists() else "no"
+    token_exists = "yes" if GOOGLE_TOKEN_PATH.exists() else "no"
+    gmail_scope = "yes" if GOOGLE_TOKEN_PATH.exists() and token_has_scope(GOOGLE_TOKEN_PATH, GMAIL_READONLY_SCOPE) else "no"
+    ready = "yes" if gmail_configured() else "no"
+    issue = gmail_configuration_issue()
+    text = (
+        "Gmail status\n"
+        f"credentials.json exists: {credentials_exists}\n"
+        f"token.json exists: {token_exists}\n"
+        f"Gmail readonly scope present: {gmail_scope}\n"
+        f"Gmail scanning ready: {ready}"
+    )
+    if issue:
+        text += f"\n\nNext step: {issue}"
+    return text
+
+
+def gmail_access_token() -> str:
+    token = os.getenv("GMAIL_ACCESS_TOKEN", "").strip() or os.getenv("GMAIL_TOKEN", "").strip()
+    if token:
+        return token
+    if gmail_configuration_issue():
+        return ""
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+    except ImportError:
+        return ""
+
+    creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN_PATH), [GMAIL_READONLY_SCOPE])
+    if creds and creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        GOOGLE_TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
+    return creds.token if creds and creds.valid else ""
+
+
+def gmail_headers(message: dict) -> dict[str, str]:
+    headers = {}
+    for header in message.get("payload", {}).get("headers", []):
+        name = str(header.get("name", "")).lower()
+        if name:
+            headers[name] = str(header.get("value", ""))
+    return headers
+
+
+def decode_gmail_body(data: str) -> str:
+    if not data:
+        return ""
+    padding = "=" * (-len(data) % 4)
+    try:
+        return urlsafe_b64decode(data + padding).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def extract_gmail_text(payload: dict) -> str:
+    body = decode_gmail_body((payload.get("body", {}) or {}).get("data", ""))
+    if payload.get("mimeType") == "text/plain" and body.strip():
+        return body
+    for part in payload.get("parts", []) or []:
+        nested = extract_gmail_text(part)
+        if nested.strip():
+            return nested
+    return body
+
+
+def gmail_error_summary(response: requests.Response) -> str:
+    body = response.text.strip()
+    message = ""
+    reason = ""
+    try:
+        data = response.json()
+        error = data.get("error", {}) if isinstance(data, dict) else {}
+        message = str(error.get("message", ""))
+        details = error.get("errors", [])
+        if details and isinstance(details, list):
+            reason = str(details[0].get("reason", ""))
+    except ValueError:
+        pass
+    short_body = re.sub(r"\s+", " ", body)[:500]
+    print(f"Gmail scan HTTP {response.status_code}: {short_body}")
+    if response.status_code == 403:
+        hint = "Check that the Gmail API is enabled for this Google Cloud project and that this Google account is allowed to use it."
+        if "insufficient" in message.lower() or "scope" in message.lower() or "insufficient" in reason.lower():
+            hint = google_reauth_instructions()
+        elif "disabled" in message.lower() or "not been used" in message.lower() or "api" in message.lower():
+            hint = "Enable the Gmail API in Google Cloud for this project, then try /scan again."
+        elif "access" in message.lower() or "blocked" in message.lower():
+            hint = "Google blocked access for this account or app. Check the OAuth consent screen and test users."
+        return f"Gmail refused the request: {message or reason or 'Forbidden'}. {hint}"
+    return f"Gmail request failed ({response.status_code}): {message or reason or short_body or 'no response body'}"
+
+
+def fetch_recent_emails() -> tuple[list[dict], list[str]]:
+    gmail_issue = gmail_configuration_issue()
+    if gmail_issue:
+        return [], [f"Gmail is not configured: {gmail_issue}"]
+
+    token = gmail_access_token()
+    if not token:
+        return [], ["Gmail is not configured: token.json is present, but no valid Gmail access token was available."]
+
+    try:
+        response = requests.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"maxResults": GMAIL_FETCH_LIMIT, "q": GMAIL_QUERY},
+            timeout=20,
+        )
+        if response.status_code >= 400:
+            return [], [gmail_error_summary(response)]
+        messages = response.json().get("messages", [])
+    except Exception as e:
+        return [], [f"Gmail scan failed: {e}"]
+
+    emails = []
+    errors = []
+    for item in messages:
+        message_id = item.get("id")
+        if not message_id or message_id in SCANNED_EMAIL_IDS:
+            continue
+        try:
+            detail = requests.get(
+                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"format": "full"},
+                timeout=20,
+            )
+            if detail.status_code >= 400:
+                errors.append(gmail_error_summary(detail))
+                continue
+            data = detail.json()
+            headers = gmail_headers(data)
+            payload = data.get("payload", {}) or {}
+            emails.append(
+                {
+                    "id": message_id,
+                    "sender": headers.get("from", ""),
+                    "subject": headers.get("subject", "(no subject)"),
+                    "received_at": headers.get("date", ""),
+                    "snippet": data.get("snippet", ""),
+                    "body": extract_gmail_text(payload).strip()[:4000],
+                }
+            )
+        except Exception as e:
+            errors.append(f"Could not read one Gmail message: {e}")
+    return emails, errors
+
+
+def email_is_important(email_item: dict) -> bool:
+    text = f"{email_item.get('subject', '')} {email_item.get('snippet', '')} {email_item.get('body', '')}".lower()
+    keywords = (
+        "appointment",
+        "meeting",
+        "schedule",
+        "scheduled",
+        "invite",
+        "calendar",
+        "deadline",
+        "due",
+        "urgent",
+        "action required",
+        "please review",
+        "interview",
+        "call",
+    )
+    return any(keyword in text for keyword in keywords)
+
+
+def short_email_summary(email_item: dict) -> str:
+    subject = email_item.get("subject", "(no subject)").strip()
+    sender = email_item.get("sender", "").strip()
+    snippet = (email_item.get("snippet") or email_item.get("body") or "").strip()
+    snippet = re.sub(r"\s+", " ", snippet)[:180]
+    prefix = f"{subject}"
+    if sender:
+        prefix = f"{prefix} from {sender}"
+    return f"{prefix}: {snippet}" if snippet else prefix
+
+
+def email_highlight(email_item: dict) -> str:
+    text = re.sub(r"\s+", " ", (email_item.get("snippet") or email_item.get("body") or "").strip())
+    subject = email_item.get("subject", "").strip()
+    combined = f"{subject}. {text}".strip()
+    lowered = combined.lower()
+    if not combined:
+        return "No preview text available."
+    if any(word in lowered for word in ("urgent", "immediately", "asap", "action required")):
+        prefix = "Urgent: "
+    elif any(word in lowered for word in ("invoice", "payment", "paid", "bill", "receipt")):
+        prefix = "Payment: "
+    elif any(word in lowered for word in ("security", "password", "sign-in", "login", "verification")):
+        prefix = "Security: "
+    elif any(word in lowered for word in ("deadline", "due", "by tomorrow", "by today")):
+        prefix = "Deadline: "
+    elif any(word in lowered for word in ("appointment", "meeting", "schedule", "invite", "calendar", "interview")):
+        prefix = "Scheduling: "
+    else:
+        prefix = ""
+    sentence = re.split(r"(?<=[.!?])\s+", text or subject, maxsplit=1)[0]
+    return (prefix + sentence)[:220]
+
+
+def email_is_urgent(email_item: dict) -> bool:
+    text = f"{email_item.get('subject', '')} {email_item.get('snippet', '')} {email_item.get('body', '')}".lower()
+    return any(word in text for word in ("urgent", "asap", "action required", "deadline", "due today", "due tomorrow"))
+
+
+def extract_meeting_link(text: str) -> str:
+    match = re.search(r"https?://\S*(?:zoom|meet\.google|teams|webex|calendar)\S*", text, flags=re.IGNORECASE)
+    if not match:
+        match = re.search(r"https?://\S+", text, flags=re.IGNORECASE)
+    return match.group(0).rstrip(").,") if match else ""
+
+
+def extract_email_location(text: str) -> str:
+    link = extract_meeting_link(text)
+    if link:
+        return link
+    match = re.search(r"\b(?:location|where|at):?\s+([^\n.]{3,120})", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def parse_email_received_date(email_item: dict) -> datetime | None:
+    value = email_item.get("received_at", "")
+    try:
+        parsed = parsedate_to_datetime(value)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(LOCAL_TZ)
+
+
+def detect_email_appointment(email_item: dict) -> dict | None:
+    text = f"{email_item.get('subject', '')}\n{email_item.get('snippet', '')}\n{email_item.get('body', '')}"
+    lowered = text.lower()
+    appointment_words = ("appointment", "meeting", "schedule", "scheduled", "invite", "calendar", "interview", "webinar")
+    has_appointment_word = any(word in lowered for word in appointment_words)
+    has_time_signal = bool(parse_human_date(text) or parse_human_time(text) or extract_meeting_link(text))
+    if not has_appointment_word or not has_time_signal:
+        return None
+
+    date_value = parse_human_date(text)
+    time_value = parse_human_time(text)
+    link = extract_meeting_link(text)
+    location = extract_email_location(text)
+    title = email_item.get("subject", "").strip() or "Email appointment"
+    summary = short_email_summary(email_item)
+    return {
+        "source_id": email_item.get("id", ""),
+        "title": title[:120],
+        "date": date_value,
+        "time": time_value,
+        "location": location[:200],
+        "meeting_link": link,
+        "sender": email_item.get("sender", ""),
+        "description": summary[:1000],
+    }
+
+
+def candidate_date_text(candidate: dict) -> str:
+    date_value = (candidate.get("date") or "").strip()
+    time_value = (candidate.get("time") or "").strip()
+    return f"{date_value} {time_value}".strip()
+
+
+def validate_email_candidate(candidate: dict) -> str:
+    if not candidate.get("title"):
+        return "I do not have a clear title for that appointment."
+    if not candidate.get("date") or not candidate.get("time"):
+        return "I do not have a clear date and start time for that appointment yet."
+    try:
+        parse_calendar_date(candidate_date_text(candidate))
+    except Exception:
+        return "I could not parse the appointment start time clearly enough."
+    return ""
+
+
+def missing_candidate_fields(candidate: dict) -> list[str]:
+    missing = []
+    if not candidate.get("title"):
+        missing.append("title")
+    if not candidate.get("date"):
+        missing.append("date")
+    if not candidate.get("time"):
+        missing.append("time")
+    return missing
+
+
+def format_appointment_candidate(candidate: dict, index: int) -> str:
+    lines = [f"📅 Possible Appointment #{index}"]
+    lines.append(f"Title: {candidate.get('title') or 'Missing'}")
+    lines.append(f"Date: {candidate.get('date') or 'Missing'}")
+    lines.append(f"Time: {candidate.get('time') or 'Missing'}")
+    lines.append(f"Location: {candidate.get('location') or 'Not found'}")
+    lines.append(f"Link: {candidate.get('meeting_link') or 'Not found'}")
+    lines.append(f"From: {candidate.get('sender') or 'Unknown'}")
+    missing = missing_candidate_fields(candidate)
+    if missing:
+        lines.append(f"Missing: {', '.join(missing)}")
+    lines.append("Would you like me to add this to your calendar?")
+    lines.append(f"Use /add {index} or /skip {index}.")
+    return "\n".join(lines)
+
+
+def format_email_card(email_item: dict, candidate: dict | None = None) -> str:
+    lines = ["📩 Important Email"]
+    lines.append(f"Subject: {email_item.get('subject') or '(no subject)'}")
+    lines.append(f"From: {email_item.get('sender') or 'Unknown'}")
+    lines.append(f"Highlight: {email_highlight(email_item)}")
+    if email_is_urgent(email_item):
+        lines.append("Urgent: Yes")
+    lines.append(f"Appointment found: {'Yes' if candidate else 'No'}")
+    if candidate:
+        date_text = candidate.get("date") or "Missing"
+        time_text = candidate.get("time") or "Missing"
+        location_text = candidate.get("location") or "Not found"
+        lines.append(f"Details: {date_text} at {time_text}; {location_text}")
+    return "\n".join(lines)
+
+
+def pending_email_summary() -> str:
+    if not PENDING_EMAIL_APPOINTMENTS:
+        return "No pending email appointments right now."
+    lines = ["Pending email appointments"]
+    for index, candidate in enumerate(PENDING_EMAIL_APPOINTMENTS, start=1):
+        lines.append("")
+        lines.append(format_appointment_candidate(candidate, index))
+    return "\n".join(lines)
+
+
+def scan_recent_email_for_updates() -> dict:
+    emails, errors = fetch_recent_emails()
+    important = [item for item in emails if email_is_important(item)]
+    candidates = []
+    candidate_by_source = {}
+    existing_sources = {item.get("source_id") for item in PENDING_EMAIL_APPOINTMENTS}
+    for email_item in important:
+        candidate = detect_email_appointment(email_item)
+        if candidate:
+            candidate_by_source[candidate.get("source_id")] = candidate
+            if candidate.get("source_id") not in existing_sources:
+                PENDING_EMAIL_APPOINTMENTS.append(candidate)
+                candidates.append(candidate)
+                existing_sources.add(candidate.get("source_id"))
+    for email_item in emails:
+        if email_item.get("id"):
+            SCANNED_EMAIL_IDS.add(email_item["id"])
+    TODAY_IMPORTANT_EMAILS[:] = important[:20]
+    return {"emails": emails, "important": important, "candidates": candidates, "candidate_by_source": candidate_by_source, "errors": errors}
+
+
+def render_scan_result(result: dict) -> str:
+    errors = result.get("errors", [])
+    important = result.get("important", [])
+    candidates = result.get("candidates", [])
+    candidate_by_source = result.get("candidate_by_source", {})
+    lines = [
+        "Email scan complete",
+        f"Important emails: {len(important)}",
+        f"Appointment candidates: {len(candidates)}",
+    ]
+    if candidates:
+        lines.append("Reply with /pending to review, then /add <number> or /skip <number>.")
+    if not important:
+        lines.append("")
+        lines.append("I did not find new important emails in the recent scan.")
+    for email_item in important[:5]:
+        lines.append("")
+        lines.append(format_email_card(email_item, candidate_by_source.get(email_item.get("id"))))
+    if candidates:
+        lines.append("")
+        for index, candidate in enumerate(candidates, start=1):
+            pending_index = PENDING_EMAIL_APPOINTMENTS.index(candidate) + 1 if candidate in PENDING_EMAIL_APPOINTMENTS else index
+            lines.append(format_appointment_candidate(candidate, pending_index))
+            lines.append("")
+    if errors:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.extend(f"- {error}" for error in errors[:3])
+    return "\n".join(lines).strip()
+
+
+def today_email_summary_text() -> str:
+    if not TODAY_IMPORTANT_EMAILS:
+        result = scan_recent_email_for_updates()
+        if result.get("errors") and not result.get("important"):
+            return "\n".join(result["errors"][:3])
+    if not TODAY_IMPORTANT_EMAILS:
+        return "No important emails found for today yet."
+    lines = ["Today's important email summary:"]
+    for email_item in TODAY_IMPORTANT_EMAILS[:8]:
+        lines.append(f"- {email_highlight(email_item)}")
+    return "\n".join(lines)
+
+
+def add_pending_candidate(index: int) -> str:
+    if index < 1 or index > len(PENDING_EMAIL_APPOINTMENTS):
+        return "That pending item number is not available."
+    candidate = PENDING_EMAIL_APPOINTMENTS[index - 1]
+    validation_error = validate_email_candidate(candidate)
+    if validation_error:
+        return f"I can’t add this yet.\n\n{validation_error}\n\nUse /pending to review what I found."
+    event = create_calendar_event(
+        candidate["title"],
+        candidate_date_text(candidate),
+        True,
+        "2",
+        candidate.get("description", ""),
+        60,
+        candidate.get("location", ""),
+        [60, 1440],
+    )
+    PENDING_EMAIL_APPOINTMENTS.pop(index - 1)
+    return (
+        "✅ Added to your calendar\n\n"
+        f"Title: {event.get('summary', candidate['title'])}\n"
+        f"When: {event_start_text(event)}\n"
+        f"Location: {candidate.get('location') or 'Not set'}"
+    )
+
+
+def send_morning_summary(send_func=None) -> str:
+    text = "Good morning. " + today_email_summary_text()
+    if send_func:
+        send_func(text)
+    return text
+
+
+def send_afternoon_summary(send_func=None) -> str:
+    text = "Afternoon check-in. " + today_email_summary_text()
+    if send_func:
+        send_func(text)
+    return text
+
+
+def send_evening_summary(send_func=None) -> str:
+    text = "Evening wrap-up. " + today_email_summary_text()
+    if send_func:
+        send_func(text)
+    return text
 
 
 def list_calendar_events(days: int = 7, max_results: int = 10) -> list[dict]:
@@ -1489,6 +2091,84 @@ def parse_positive_int(args: list[str], default: int, maximum: int) -> int:
         return default
 
 
+def ollama_mode_label() -> str:
+    if OLLAMA_MODE == "chat":
+        return "chat (generate fallback if /api/chat returns 404)"
+    return "generate fallback"
+
+
+def enabled_features() -> list[str]:
+    features = [
+        "Google Calendar actions",
+        "natural calendar parsing",
+        "Ollama chat",
+        "system status",
+        "file read/write commands",
+    ]
+    if BUBBLES_ENABLE_DEV_COMMANDS:
+        features.append("dev test event seeding")
+    return features
+
+
+def safe_ollama_text() -> str:
+    global LAST_OLLAMA_HEALTH
+    health = ollama_diagnostics(OLLAMA_HEALTH_TIMEOUT_SECONDS)
+    LAST_OLLAMA_HEALTH = health
+    tags = health["tags"]
+    model_installed = "yes" if health["model_installed"] else "no"
+    remaining = ollama_cooldown_remaining()
+    if remaining:
+        state = "cooldown"
+    elif tags.get("ok"):
+        state = "online"
+    else:
+        state = "offline"
+    last_error = OLLAMA_LAST_ERROR or "none"
+    cooldown_suffix = f" ({remaining}s remaining)" if remaining else ""
+
+    return (
+        "Ollama brain\n\n"
+        f"Base URL: {OLLAMA_BASE_URL}\n"
+        f"Configured model: {MODEL}\n"
+        f"/api/tags: {format_ollama_check_result(tags)}\n"
+        f"Model installed: {model_installed}\n"
+        f"Chat brain state: {state}{cooldown_suffix}\n"
+        f"Last error type: {last_error}\n"
+        f"Timeouts: connect {OLLAMA_CONNECT_TIMEOUT_SECONDS}s, read {OLLAMA_READ_TIMEOUT_SECONDS}s\n"
+        f"Cooldown: {OLLAMA_COOLDOWN_SECONDS}s\n"
+        f"Prompt caps: {OLLAMA_MAX_HISTORY_TURNS} turns, {OLLAMA_PROMPT_CHAR_LIMIT} chars"
+    )
+
+
+def safe_about_text() -> str:
+    global LAST_OLLAMA_HEALTH
+    health = ollama_diagnostics(OLLAMA_HEALTH_TIMEOUT_SECONDS)
+    LAST_OLLAMA_HEALTH = health
+    tags = health["tags"]
+    health_label = format_ollama_check_result(tags)
+    model_installed = "yes" if health["model_installed"] else "no"
+    platform_label = f"{platform.system()} {platform.machine()}".strip()
+    python_label = platform.python_version()
+    dev_status = "enabled" if BUBBLES_ENABLE_DEV_COMMANDS else "disabled"
+
+    return (
+        "Bubbles self-info\n\n"
+        f"Running on: {platform_label}; Python {python_label}\n"
+        f"Ollama base URL: {OLLAMA_BASE_URL}\n"
+        f"Configured model: {MODEL}\n"
+        f"Ollama mode: {ollama_mode_label()}\n"
+        f"Ollama health: {health_label}; model installed: {model_installed}\n"
+        f"Timezone: {GOOGLE_CALENDAR_TIMEZONE}\n"
+        f"Enabled features: {', '.join(enabled_features())}; dev commands {dev_status}\n\n"
+        "Commands: /start, /about, /helpme, /ollama, /brain, /id, /status, /calendar [days], /next, "
+        "/free [days], /scan, /gmailstatus, /summary, /pending, /add, /skip, /addall, /clearpending, "
+        "/add_event, /calendar_setup, /ls, /read, /write.\n\n"
+        "Natural requests: create or schedule calendar events, show upcoming appointments, "
+        "ask for the next appointment, ask for the next available day, and save usual "
+        "appointment locations or reminders."
+    )
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         await update.message.reply_text("❌ Not authorized.")
@@ -1497,11 +2177,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 Bubbles is online.\n\n"
         "Commands:\n"
+        "/about\n"
+        "/helpme\n"
+        "/ollama\n"
+        "/brain\n"
         "/id\n"
         "/status\n"
         "/calendar [days]\n"
         "/next\n"
         "/free [days]\n"
+        "/scan\n"
+        "/gmailstatus\n"
+        "/summary\n"
+        "/pending\n"
+        "/add <number>\n"
+        "/skip <number>\n"
+        "/addall\n"
+        "/clearpending\n"
         "/add_event <title> | <date> | <reminders yes/no> | <reminder count> | [description]\n"
         "/calendar_setup\n"
         "/ls [path]\n"
@@ -1510,6 +2202,22 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "You can also ask things like \"What's my next upcoming appointment?\" "
         "or \"Create a call with Sam for the 25th of April.\""
     )
+
+
+async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    await update.message.reply_text(safe_about_text()[:4000])
+
+
+async def ollama_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    await update.message.reply_text(safe_ollama_text()[:4000])
 
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1532,11 +2240,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Not authorized.")
         return
 
+    service_status = service_status_text()
     cpu = run_command(["bash", "-lc", "uptime"])
     ram = run_command(["bash", "-lc", "free -h"])
     disk = run_command(["bash", "-lc", "df -h /"])
 
-    reply = f"🖥️ System Status\n\nUptime:\n{cpu}\n\nRAM:\n{ram}\n\nDisk:\n{disk}"
+    reply = f"{service_status}\n\n🖥️ System Status\n\nUptime:\n{cpu}\n\nRAM:\n{ram}\n\nDisk:\n{disk}"
     await update.message.reply_text(reply[:4000])
 
 
@@ -1573,6 +2282,127 @@ async def free_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(next_available_day_summary(days)[:4000])
     except Exception as e:
         await update.message.reply_text(f"❌ Calendar error: {e}")
+
+
+async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    await update.message.reply_text(render_scan_result(scan_recent_email_for_updates())[:4000])
+
+
+async def email_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    await update.message.reply_text(today_email_summary_text()[:4000])
+
+
+async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    await update.message.reply_text(pending_email_summary()[:4000])
+
+
+async def gmail_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    await update.message.reply_text(gmail_status_text()[:4000])
+
+
+def parse_pending_index(args: list[str]) -> int | None:
+    if not args:
+        return None
+    try:
+        return int(args[0])
+    except ValueError:
+        return None
+
+
+async def add_pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    index = parse_pending_index(context.args)
+    if index is None:
+        await update.message.reply_text("Use /add <number> from the /pending list.")
+        return
+    try:
+        await update.message.reply_text(add_pending_candidate(index)[:4000])
+    except Exception as e:
+        await update.message.reply_text(f"❌ Calendar error: {e}")
+
+
+async def skip_pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    index = parse_pending_index(context.args)
+    if index is None:
+        await update.message.reply_text("Use /skip <number> from the /pending list.")
+        return
+    if index < 1 or index > len(PENDING_EMAIL_APPOINTMENTS):
+        await update.message.reply_text("That pending item number is not available.")
+        return
+    candidate = PENDING_EMAIL_APPOINTMENTS.pop(index - 1)
+    await update.message.reply_text(f"Skipped this appointment candidate:\n\n{candidate.get('title', 'Untitled appointment')}")
+
+
+async def add_all_pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    if not PENDING_EMAIL_APPOINTMENTS:
+        await update.message.reply_text("No pending email appointments right now.")
+        return
+
+    added = []
+    kept = []
+    for candidate in list(PENDING_EMAIL_APPOINTMENTS):
+        validation_error = validate_email_candidate(candidate)
+        if validation_error:
+            kept.append(candidate)
+            continue
+        try:
+            event = create_calendar_event(
+                candidate["title"],
+                candidate_date_text(candidate),
+                True,
+                "2",
+                candidate.get("description", ""),
+                60,
+                candidate.get("location", ""),
+                [60, 1440],
+            )
+            added.append(f"{event_start_text(event)} — {event.get('summary', candidate['title'])}")
+        except Exception as e:
+            kept.append(candidate)
+            added.append(f"Could not add {candidate.get('title', 'one item')}: {e}")
+    PENDING_EMAIL_APPOINTMENTS[:] = kept
+    if not added:
+        await update.message.reply_text("I could not add any pending items because they need clearer date and time details.")
+        return
+    suffix = f"\n\n{len(kept)} item(s) still need clearer details." if kept else ""
+    await update.message.reply_text(("Added:\n" + "\n".join(f"- {item}" for item in added) + suffix)[:4000])
+
+
+async def clear_pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    count = len(PENDING_EMAIL_APPOINTMENTS)
+    PENDING_EMAIL_APPOINTMENTS.clear()
+    await update.message.reply_text(f"Cleared {count} pending appointment{'s' if count != 1 else ''}.")
 
 
 async def add_event_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2051,20 +2881,37 @@ def main():
         raise RuntimeError("Missing BUBBLES_ALLOWED_USER_ID. Add your Telegram numeric user ID to .env.")
 
     mode = configure_ollama_mode()
-    mode_label = "chat" if mode == "chat" else "generate fallback"
+    mode_label = ollama_mode_label()
     endpoint = OLLAMA_CHAT_URL if mode == "chat" else OLLAMA_GENERATE_URL
     print(f"Ollama model: {MODEL}")
     print(f"Ollama mode: {mode_label}")
     print(f"Ollama endpoint: {endpoint}")
+    print(service_status_text(LAST_OLLAMA_HEALTH))
+    print(
+        "Ollama timeouts: "
+        f"connect={OLLAMA_CONNECT_TIMEOUT_SECONDS}s read={OLLAMA_READ_TIMEOUT_SECONDS}s "
+        f"cooldown={OLLAMA_COOLDOWN_SECONDS}s history_turns={OLLAMA_MAX_HISTORY_TURNS} "
+        f"prompt_chars={OLLAMA_PROMPT_CHAR_LIMIT}"
+    )
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler(["about", "helpme"], about_command))
+    app.add_handler(CommandHandler(["ollama", "brain"], ollama_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("calendar", calendar_command))
     app.add_handler(CommandHandler("next", next_command))
     app.add_handler(CommandHandler("free", free_command))
+    app.add_handler(CommandHandler("scan", scan_command))
+    app.add_handler(CommandHandler("gmailstatus", gmail_status_command))
+    app.add_handler(CommandHandler("summary", email_summary_command))
+    app.add_handler(CommandHandler("pending", pending_command))
+    app.add_handler(CommandHandler("add", add_pending_command))
+    app.add_handler(CommandHandler("skip", skip_pending_command))
+    app.add_handler(CommandHandler("addall", add_all_pending_command))
+    app.add_handler(CommandHandler("clearpending", clear_pending_command))
     app.add_handler(CommandHandler("add_event", add_event_command))
     app.add_handler(CommandHandler("seed_test_events", seed_test_events_command))
     app.add_handler(CommandHandler("calendar_setup", calendar_setup_command))

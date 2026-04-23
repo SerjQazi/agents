@@ -125,6 +125,7 @@ class BubblesCalendarParsingTests(unittest.TestCase):
         self.assertEqual(reply, "hi")
         self.assertEqual(calls[0]["url"], "http://localhost:11434/api/chat")
         self.assertEqual(calls[0]["json"]["model"], "qwen3:8b")
+        self.assertEqual(calls[0]["timeout"], (5, 30))
         self.assertIn("messages", calls[0]["json"])
         self.assertNotIn("prompt", calls[0]["json"])
         self.assertEqual(calls[0]["json"]["messages"][0]["role"], "system")
@@ -179,25 +180,81 @@ class BubblesCalendarParsingTests(unittest.TestCase):
     def test_ask_ollama_uses_friendly_error_when_offline(self):
         original_post = bubbles.requests.post
         original_mode = bubbles.OLLAMA_MODE
+        original_offline_until = bubbles.OLLAMA_OFFLINE_UNTIL
+        original_last_error = bubbles.OLLAMA_LAST_ERROR
 
         def fake_post(*args, **kwargs):
             raise RuntimeError("raw url failure")
 
         bubbles.requests.post = fake_post
         bubbles.OLLAMA_MODE = "generate"
+        bubbles.OLLAMA_OFFLINE_UNTIL = 0
         try:
             reply = bubbles.ask_ollama(123, "hello")
         finally:
             bubbles.requests.post = original_post
             bubbles.OLLAMA_MODE = original_mode
+            bubbles.OLLAMA_OFFLINE_UNTIL = original_offline_until
+            bubbles.OLLAMA_LAST_ERROR = original_last_error
 
         self.assertEqual(reply, "I can handle calendar commands, but my chat brain is offline. Check Ollama setup.")
         self.assertNotIn("raw url", reply)
 
-    def test_configure_ollama_mode_uses_generate_fallback_when_chat_404(self):
+    def test_ask_ollama_uses_friendly_error_on_timeout(self):
+        original_post = bubbles.requests.post
+        original_mode = bubbles.OLLAMA_MODE
+        original_offline_until = bubbles.OLLAMA_OFFLINE_UNTIL
+        original_last_error = bubbles.OLLAMA_LAST_ERROR
+
+        def fake_post(*args, **kwargs):
+            raise bubbles.requests.Timeout("slow model")
+
+        bubbles.requests.post = fake_post
+        bubbles.OLLAMA_MODE = "chat"
+        bubbles.OLLAMA_OFFLINE_UNTIL = 0
+        try:
+            reply = bubbles.ask_ollama(123, "hello")
+        finally:
+            bubbles.requests.post = original_post
+            bubbles.OLLAMA_MODE = original_mode
+            offline_until = bubbles.OLLAMA_OFFLINE_UNTIL
+            last_error = bubbles.OLLAMA_LAST_ERROR
+            bubbles.OLLAMA_OFFLINE_UNTIL = original_offline_until
+            bubbles.OLLAMA_LAST_ERROR = original_last_error
+
+        self.assertEqual(reply, "I’m a bit overloaded right now. Please try again in a moment.")
+        self.assertNotIn("slow model", reply)
+        self.assertGreater(offline_until, bubbles.current_timestamp())
+        self.assertEqual(last_error, "Timeout")
+
+    def test_ask_ollama_skips_requests_during_cooldown(self):
+        original_post = bubbles.requests.post
+        original_offline_until = bubbles.OLLAMA_OFFLINE_UNTIL
+        original_last_error = bubbles.OLLAMA_LAST_ERROR
+        calls = []
+
+        def fake_post(*args, **kwargs):
+            calls.append(args)
+            raise AssertionError("Ollama should not be called during cooldown")
+
+        bubbles.requests.post = fake_post
+        bubbles.OLLAMA_OFFLINE_UNTIL = bubbles.current_timestamp() + 300
+        bubbles.OLLAMA_LAST_ERROR = "ReadTimeout"
+        try:
+            reply = bubbles.ask_ollama(123, "hello")
+        finally:
+            bubbles.requests.post = original_post
+            bubbles.OLLAMA_OFFLINE_UNTIL = original_offline_until
+            bubbles.OLLAMA_LAST_ERROR = original_last_error
+
+        self.assertEqual(reply, "I’m a bit overloaded right now. Please try again in a moment.")
+        self.assertEqual(calls, [])
+
+    def test_configure_ollama_mode_uses_quick_tags_check_without_post_probe(self):
         original_get = bubbles.requests.get
         original_post = bubbles.requests.post
         original_mode = bubbles.OLLAMA_MODE
+        post_calls = []
 
         class FakeResponse:
             def __init__(self, status_code, payload=None):
@@ -212,6 +269,7 @@ class BubblesCalendarParsingTests(unittest.TestCase):
                 return self.payload
 
         def fake_post(url, *args, **kwargs):
+            post_calls.append(url)
             if url.endswith("/api/generate"):
                 return FakeResponse(200)
             return FakeResponse(404)
@@ -225,7 +283,8 @@ class BubblesCalendarParsingTests(unittest.TestCase):
             bubbles.requests.post = original_post
             bubbles.OLLAMA_MODE = original_mode
 
-        self.assertEqual(mode, "generate")
+        self.assertEqual(mode, "chat")
+        self.assertEqual(post_calls, [])
 
     def test_ollama_diagnostics_reports_tags_and_model_status(self):
         original_get = bubbles.requests.get
@@ -238,12 +297,12 @@ class BubblesCalendarParsingTests(unittest.TestCase):
                 return None
 
             def json(self):
-                return {"models": [{"name": "qwen3:8b"}]}
+                return {"models": [{"name": "llama3.2:3b"}]}
 
         bubbles.requests.get = lambda *args, **kwargs: FakeResponse()
         bubbles.requests.post = lambda *args, **kwargs: FakeResponse()
         try:
-            diagnostics = bubbles.ollama_diagnostics()
+            diagnostics = bubbles.ollama_diagnostics(include_post=True)
         finally:
             bubbles.requests.get = original_get
             bubbles.requests.post = original_post
@@ -252,6 +311,95 @@ class BubblesCalendarParsingTests(unittest.TestCase):
         self.assertTrue(diagnostics["model_installed"])
         self.assertTrue(diagnostics["generate"]["ok"])
         self.assertTrue(diagnostics["chat"]["ok"])
+
+    def test_ollama_diagnostics_skips_post_checks_by_default(self):
+        original_get = bubbles.requests.get
+        original_post = bubbles.requests.post
+        post_calls = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"models": [{"name": "llama3.2:3b"}]}
+
+        bubbles.requests.get = lambda *args, **kwargs: FakeResponse()
+        bubbles.requests.post = lambda *args, **kwargs: post_calls.append(args)
+        try:
+            diagnostics = bubbles.ollama_diagnostics()
+        finally:
+            bubbles.requests.get = original_get
+            bubbles.requests.post = original_post
+
+        self.assertTrue(diagnostics["tags"]["ok"])
+        self.assertNotIn("generate", diagnostics)
+        self.assertNotIn("chat", diagnostics)
+        self.assertEqual(post_calls, [])
+
+    def test_safe_about_text_has_operational_info_without_secret_paths(self):
+        original_get = bubbles.requests.get
+
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"models": [{"name": "llama3.2:3b"}]}
+
+        bubbles.requests.get = lambda *args, **kwargs: FakeResponse()
+        try:
+            text = bubbles.safe_about_text()
+        finally:
+            bubbles.requests.get = original_get
+
+        self.assertIn("Ollama base URL:", text)
+        self.assertIn("Configured model: llama3.2:3b", text)
+        self.assertIn("Ollama mode:", text)
+        self.assertIn("Timezone:", text)
+        self.assertIn("/about", text)
+        self.assertIn("Natural requests:", text)
+        self.assertNotIn("BUBBLES_BOT_TOKEN", text)
+        self.assertNotIn("credentials.json", text)
+        self.assertNotIn("token.json", text)
+
+    def test_safe_ollama_text_reports_brain_state_without_secrets(self):
+        original_get = bubbles.requests.get
+        original_offline_until = bubbles.OLLAMA_OFFLINE_UNTIL
+        original_last_error = bubbles.OLLAMA_LAST_ERROR
+
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"models": [{"name": "llama3.2:3b"}]}
+
+        bubbles.requests.get = lambda *args, **kwargs: FakeResponse()
+        bubbles.OLLAMA_OFFLINE_UNTIL = bubbles.current_timestamp() + 300
+        bubbles.OLLAMA_LAST_ERROR = "ReadTimeout"
+        try:
+            text = bubbles.safe_ollama_text()
+        finally:
+            bubbles.requests.get = original_get
+            bubbles.OLLAMA_OFFLINE_UNTIL = original_offline_until
+            bubbles.OLLAMA_LAST_ERROR = original_last_error
+
+        self.assertIn("Base URL:", text)
+        self.assertIn("Configured model: llama3.2:3b", text)
+        self.assertIn("/api/tags: ok", text)
+        self.assertIn("Model installed: yes", text)
+        self.assertIn("Chat brain state: cooldown", text)
+        self.assertIn("Last error type: ReadTimeout", text)
+        self.assertNotIn("BUBBLES_BOT_TOKEN", text)
+        self.assertNotIn("credentials.json", text)
+        self.assertNotIn("token.json", text)
 
     def test_reminder_offsets_parse_natural_replies(self):
         cases = {
