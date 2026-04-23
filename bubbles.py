@@ -10,8 +10,8 @@ from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, MessageHandler, CommandHandler, filters, ContextTypes
 
 
 def load_dotenv(path: Path) -> None:
@@ -90,12 +90,19 @@ MEMORY_PATH = Path(os.getenv("BUBBLES_MEMORY_PATH", "memory.json"))
 BUBBLES_ENABLE_DEV_COMMANDS = os.getenv("BUBBLES_ENABLE_DEV_COMMANDS", "").strip().lower() in {"1", "true", "yes", "on"}
 CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
-GOOGLE_OAUTH_SCOPES = CALENDAR_SCOPES + [GMAIL_READONLY_SCOPE]
+GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+GOOGLE_OAUTH_SCOPES = CALENDAR_SCOPES + [GMAIL_MODIFY_SCOPE]
 GMAIL_FETCH_LIMIT = max(1, min(int(os.getenv("GMAIL_FETCH_LIMIT", "10")), 25))
 GMAIL_QUERY = os.getenv("GMAIL_QUERY", "newer_than:2d")
+GMAIL_PROMO_QUERY = os.getenv("GMAIL_PROMO_QUERY", "category:promotions newer_than:7d")
 REMINDER_MINUTES = [10, 30, 60, 24 * 60, 7 * 24 * 60]
 PENDING_EVENTS: dict[int, dict] = {}
 PENDING_EMAIL_APPOINTMENTS: list[dict] = []
+EMAIL_CARDS: dict[int, dict] = {}
+NEXT_EMAIL_CARD_ID = 1
+SCAN_BATCHES: dict[int, dict] = {}
+NEXT_SCAN_BATCH_ID = 1
+SHOWN_SCAN_ITEM_IDS_BY_DATE: dict[str, set[str]] = {}
 TODAY_IMPORTANT_EMAILS: list[dict] = []
 SCANNED_EMAIL_IDS: set[str] = set()
 CHAT_MEMORY: dict[int, list[dict[str, str]]] = {}
@@ -770,7 +777,7 @@ def setup_google_calendar_auth() -> str:
     flow = InstalledAppFlow.from_client_secrets_file(str(GOOGLE_CREDENTIALS_PATH), GOOGLE_OAUTH_SCOPES)
     creds = flow.run_local_server(port=0)
     GOOGLE_TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
-    return f"Google Calendar and Gmail readonly access authorized. Token saved to {GOOGLE_TOKEN_PATH}."
+    return f"Google Calendar and Gmail modify access authorized. Token saved to {GOOGLE_TOKEN_PATH}."
 
 
 def token_has_scope(path: Path, scope: str) -> bool:
@@ -781,6 +788,15 @@ def google_reauth_instructions() -> str:
     return f"Delete {GOOGLE_TOKEN_PATH}, run python3 bubbles.py --google-auth, then complete Google OAuth again."
 
 
+def token_has_gmail_access(path: Path) -> bool:
+    granted_scopes = token_scopes(path)
+    return GMAIL_MODIFY_SCOPE in granted_scopes or GMAIL_READONLY_SCOPE in granted_scopes
+
+
+def token_has_gmail_modify(path: Path) -> bool:
+    return token_has_scope(path, GMAIL_MODIFY_SCOPE)
+
+
 def gmail_configuration_issue() -> str:
     if os.getenv("GMAIL_ACCESS_TOKEN", "").strip() or os.getenv("GMAIL_TOKEN", "").strip():
         return ""
@@ -788,9 +804,15 @@ def gmail_configuration_issue() -> str:
         return (
             f"{GOOGLE_TOKEN_PATH} is missing. Run python3 bubbles.py --google-auth and complete Google OAuth."
         )
-    if not token_has_scope(GOOGLE_TOKEN_PATH, GMAIL_READONLY_SCOPE):
+    if not token_has_gmail_access(GOOGLE_TOKEN_PATH):
         return (
-            f"{GOOGLE_TOKEN_PATH} is present, but Gmail readonly scope is missing. "
+            f"{GOOGLE_TOKEN_PATH} is present, but Gmail access scope is missing. "
+            + google_reauth_instructions()
+        )
+    if not token_has_gmail_modify(GOOGLE_TOKEN_PATH):
+        return (
+            f"{GOOGLE_TOKEN_PATH} is present, but Gmail modify scope is missing. "
+            "Bubbles needs it to mark messages read. "
             + google_reauth_instructions()
         )
     return ""
@@ -807,14 +829,16 @@ def calendar_configured() -> bool:
 def gmail_status_text() -> str:
     credentials_exists = "yes" if GOOGLE_CREDENTIALS_PATH.exists() else "no"
     token_exists = "yes" if GOOGLE_TOKEN_PATH.exists() else "no"
-    gmail_scope = "yes" if GOOGLE_TOKEN_PATH.exists() and token_has_scope(GOOGLE_TOKEN_PATH, GMAIL_READONLY_SCOPE) else "no"
+    gmail_scope = "yes" if GOOGLE_TOKEN_PATH.exists() and token_has_gmail_access(GOOGLE_TOKEN_PATH) else "no"
+    gmail_modify = "yes" if GOOGLE_TOKEN_PATH.exists() and token_has_gmail_modify(GOOGLE_TOKEN_PATH) else "no"
     ready = "yes" if gmail_configured() else "no"
     issue = gmail_configuration_issue()
     text = (
         "Gmail status\n"
         f"credentials.json exists: {credentials_exists}\n"
         f"token.json exists: {token_exists}\n"
-        f"Gmail readonly scope present: {gmail_scope}\n"
+        f"Gmail access scope present: {gmail_scope}\n"
+        f"Gmail modify scope present: {gmail_modify}\n"
         f"Gmail scanning ready: {ready}"
     )
     if issue:
@@ -834,7 +858,7 @@ def gmail_access_token() -> str:
     except ImportError:
         return ""
 
-    creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN_PATH), [GMAIL_READONLY_SCOPE])
+    creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN_PATH), [GMAIL_MODIFY_SCOPE])
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
         GOOGLE_TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
@@ -898,7 +922,7 @@ def gmail_error_summary(response: requests.Response) -> str:
     return f"Gmail request failed ({response.status_code}): {message or reason or short_body or 'no response body'}"
 
 
-def fetch_recent_emails() -> tuple[list[dict], list[str]]:
+def fetch_recent_emails(query: str | None = None, skip_seen: bool = True) -> tuple[list[dict], list[str]]:
     gmail_issue = gmail_configuration_issue()
     if gmail_issue:
         return [], [f"Gmail is not configured: {gmail_issue}"]
@@ -911,7 +935,7 @@ def fetch_recent_emails() -> tuple[list[dict], list[str]]:
         response = requests.get(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages",
             headers={"Authorization": f"Bearer {token}"},
-            params={"maxResults": GMAIL_FETCH_LIMIT, "q": GMAIL_QUERY},
+            params={"maxResults": GMAIL_FETCH_LIMIT, "q": query or GMAIL_QUERY},
             timeout=20,
         )
         if response.status_code >= 400:
@@ -924,7 +948,7 @@ def fetch_recent_emails() -> tuple[list[dict], list[str]]:
     errors = []
     for item in messages:
         message_id = item.get("id")
-        if not message_id or message_id in SCANNED_EMAIL_IDS:
+        if not message_id or (skip_seen and message_id in SCANNED_EMAIL_IDS):
             continue
         try:
             detail = requests.get(
@@ -954,6 +978,29 @@ def fetch_recent_emails() -> tuple[list[dict], list[str]]:
     return emails, errors
 
 
+def mark_gmail_message_read(message_id: str) -> str:
+    if not message_id:
+        return "I could not find that Gmail message."
+    gmail_issue = gmail_configuration_issue()
+    if gmail_issue:
+        return f"I can’t mark that read yet. {gmail_issue}"
+    token = gmail_access_token()
+    if not token:
+        return "I can’t mark that read because no valid Gmail access token is available."
+    try:
+        response = requests.post(
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}/modify",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"removeLabelIds": ["UNREAD"]},
+            timeout=20,
+        )
+        if response.status_code >= 400:
+            return gmail_error_summary(response)
+    except Exception as e:
+        return f"Gmail read update failed: {e}"
+    return "✅ Marked as read."
+
+
 def email_is_important(email_item: dict) -> bool:
     text = f"{email_item.get('subject', '')} {email_item.get('snippet', '')} {email_item.get('body', '')}".lower()
     keywords = (
@@ -972,6 +1019,150 @@ def email_is_important(email_item: dict) -> bool:
         "call",
     )
     return any(keyword in text for keyword in keywords)
+
+
+def email_why_it_matters(email_item: dict) -> str:
+    text = f"{email_item.get('subject', '')} {email_item.get('snippet', '')} {email_item.get('body', '')}".lower()
+    if any(word in text for word in ("urgent", "asap", "action required")):
+        return "It looks time-sensitive."
+    if any(word in text for word in ("deadline", "due today", "due tomorrow", "please review")):
+        return "There may be a deadline or requested action."
+    if any(word in text for word in ("appointment", "meeting", "schedule", "calendar", "interview")):
+        return "It may affect your calendar."
+    if any(word in text for word in ("invoice", "payment", "receipt", "bill")):
+        return "It appears payment-related."
+    if any(word in text for word in ("security", "password", "sign-in", "login", "verification")):
+        return "It may be account or security related."
+    return "It matched your important-email signals."
+
+
+def email_is_promotional(email_item: dict) -> bool:
+    text = f"{email_item.get('sender', '')} {email_item.get('subject', '')} {email_item.get('snippet', '')} {email_item.get('body', '')}".lower()
+    promo_words = ("sale", "deal", "discount", "off", "coupon", "offer", "promo", "save", "limited time", "expires")
+    weak_words = ("unsubscribe", "newsletter", "digest", "sponsored")
+    return any(word in text for word in promo_words) and not all(word in text for word in weak_words)
+
+
+def promo_score(email_item: dict) -> int:
+    text = f"{email_item.get('subject', '')} {email_item.get('snippet', '')} {email_item.get('body', '')}".lower()
+    score = 0
+    strong_terms = ("50% off", "60% off", "70% off", "free shipping", "expires today", "last chance", "limited time")
+    useful_terms = ("discount", "coupon", "sale", "deal", "offer", "save")
+    spam_terms = ("crypto", "winner", "guaranteed", "act now", "risk-free")
+    score += sum(2 for term in strong_terms if term in text)
+    score += sum(1 for term in useful_terms if term in text)
+    score -= sum(2 for term in spam_terms if term in text)
+    if re.search(r"\b\d{2,3}%\s+off\b", text):
+        score += 2
+    return score
+
+
+def ollama_digest_completion(prompt: str) -> str:
+    if ollama_cooldown_remaining() > 0:
+        return ""
+    try:
+        response = requests.post(
+            OLLAMA_GENERATE_URL,
+            json={
+                "model": MODEL,
+                "prompt": cap_text(prompt, 1800),
+                "stream": False,
+                "options": {"num_predict": 64},
+            },
+            timeout=OLLAMA_REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+        mark_ollama_online()
+        return parse_ollama_response(data)
+    except requests.Timeout as e:
+        mark_ollama_offline(e.__class__.__name__)
+        print(f"Ollama digest ranking timed out: {e.__class__.__name__}; cooling down for {OLLAMA_COOLDOWN_SECONDS}s.")
+    except Exception as e:
+        global OLLAMA_LAST_ERROR
+        OLLAMA_LAST_ERROR = e.__class__.__name__
+        print(f"Ollama digest ranking failed: {e}")
+    return ""
+
+
+def extract_ranked_ids(value: str) -> list[str]:
+    if not value:
+        return []
+    try:
+        data = json.loads(value)
+        if isinstance(data, list):
+            return [str(item) for item in data]
+        if isinstance(data, dict):
+            ids = data.get("ids") or data.get("items")
+            if isinstance(ids, list):
+                return [str(item) for item in ids]
+    except json.JSONDecodeError:
+        pass
+    return re.findall(r"[A-Za-z]+:[A-Za-z0-9_-]+", value)
+
+
+def ai_order_email_ids(items: list[dict], purpose: str, limit: int | None = None) -> list[str]:
+    if len(items) < 2:
+        return [item.get("id", "") for item in items if item.get("id")]
+    lines = [
+        "Rank these Gmail message ids for a Telegram assistant.",
+        f"Purpose: {purpose}.",
+        "Return only a JSON array of ids, best first.",
+    ]
+    for item in items[:8]:
+        lines.append(
+            "- "
+            + json.dumps(
+                {
+                    "id": item.get("id", ""),
+                    "from": compact_text(item.get("sender", ""), 80),
+                    "subject": compact_text(item.get("subject", ""), 100),
+                    "snippet": compact_text(item.get("snippet") or item.get("body"), 180),
+                },
+                ensure_ascii=True,
+            )
+        )
+    ranked = extract_ranked_ids(ollama_digest_completion("\n".join(lines)))
+    allowed = {item.get("id", "") for item in items}
+    ordered = [item_id for item_id in ranked if item_id in allowed]
+    ordered.extend(item.get("id", "") for item in items if item.get("id", "") not in ordered)
+    return ordered[:limit] if limit else ordered
+
+
+def extract_sender_brand(sender: str) -> str:
+    sender = sender.strip()
+    match = re.search(r"([^<]+)<", sender)
+    if match:
+        return match.group(1).strip().strip('"')[:80]
+    if "@" in sender:
+        domain = sender.split("@", 1)[1].split(">", 1)[0]
+        return domain.split(".", 1)[0].replace("-", " ").title()[:80]
+    return sender[:80] or "Unknown"
+
+
+def promo_offer_text(email_item: dict) -> str:
+    text = re.sub(r"\s+", " ", f"{email_item.get('subject', '')}. {email_item.get('snippet', '')}")
+    percent = re.search(r"\b\d{2,3}%\s+off\b[^.]*", text, flags=re.IGNORECASE)
+    if percent:
+        return percent.group(0).strip()[:160]
+    sentence = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0]
+    return sentence[:160] or "Offer details were not clear."
+
+
+def promo_expiry_text(email_item: dict) -> str:
+    text = f"{email_item.get('subject', '')} {email_item.get('snippet', '')} {email_item.get('body', '')}"
+    match = re.search(r"\b(?:expires|ends|through|until)\s+([^.\n]{3,80})", text, flags=re.IGNORECASE)
+    return match.group(1).strip()[:80] if match else "Not found"
+
+
+def choose_promo_picks(emails: list[dict]) -> list[dict]:
+    scored = [(promo_score(item), item) for item in emails if email_is_promotional(item)]
+    scored = [(score, item) for score, item in scored if score >= 3]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    candidates = [item for _, item in scored[:5]]
+    ranked_ids = ai_order_email_ids(candidates, "choose genuinely useful promotions", limit=2)
+    by_id = {item.get("id", ""): item for item in candidates}
+    return [by_id[item_id] for item_id in ranked_ids if item_id in by_id][:2]
 
 
 def short_email_summary(email_item: dict) -> str:
@@ -1064,6 +1255,7 @@ def detect_email_appointment(email_item: dict) -> dict | None:
         "location": location[:200],
         "meeting_link": link,
         "sender": email_item.get("sender", ""),
+        "status": "pending",
         "description": summary[:1000],
     }
 
@@ -1097,20 +1289,256 @@ def missing_candidate_fields(candidate: dict) -> list[str]:
     return missing
 
 
+SCAN_PAGE_SIZE = 3
+
+
+def next_email_card_id() -> int:
+    global NEXT_EMAIL_CARD_ID
+    card_id = NEXT_EMAIL_CARD_ID
+    NEXT_EMAIL_CARD_ID += 1
+    return card_id
+
+
+def next_scan_batch_id() -> int:
+    global NEXT_SCAN_BATCH_ID
+    batch_id = NEXT_SCAN_BATCH_ID
+    NEXT_SCAN_BATCH_ID += 1
+    return batch_id
+
+
+def register_email_card(email_item: dict, kind: str) -> int:
+    card_id = next_email_card_id()
+    EMAIL_CARDS[card_id] = {
+        "id": email_item.get("id", ""),
+        "kind": kind,
+        "status": "pending",
+        "subject": email_item.get("subject", "(no subject)"),
+    }
+    return card_id
+
+
+def email_card_keyboard(card_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Read", callback_data=f"email:read:{card_id}"),
+                InlineKeyboardButton("⏸ Skip", callback_data=f"email:skip:{card_id}"),
+            ],
+        ]
+    )
+
+
+def email_status_keyboard(card_id: int, left: str, right: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(left, callback_data=f"email:status:{card_id}"), InlineKeyboardButton(right, callback_data=f"email:status:{card_id}")]])
+
+
+def appointment_status_keyboard(index: int, left: str, right: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(left, callback_data=f"appt:status:{index}"), InlineKeyboardButton(right, callback_data=f"appt:status:{index}")]])
+
+
+def scan_more_keyboard(batch_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Show More Emails", callback_data=f"scan:more:{batch_id}")]])
+
+
+def clean_card_text(lines: list[str]) -> str:
+    return "\n" + "\n".join(lines).strip() + "\n"
+
+
+def compact_text(value: str | None, limit: int = 160) -> str:
+    value = (value or "").strip()
+    value = re.sub(r"\s+", " ", value)
+    if len(value) > limit:
+        return value[: max(0, limit - 1)].rstrip() + "…"
+    return value
+
+
+def display_field(value: str | None, limit: int = 160) -> str:
+    value = compact_text(value, limit)
+    return value if value else "—"
+
+
+def looks_like_time(value: str) -> bool:
+    value = value.strip().lower()
+    return bool(re.fullmatch(r"\d{1,2}(:\d{2})?\s*(am|pm)?", value) or re.fullmatch(r"\d{1,2}\s*(am|pm)", value))
+
+
+def display_location(value: str | None) -> str:
+    value = compact_text(value, 140)
+    if not value or looks_like_time(value):
+        return "—"
+    return value
+
+
+def scan_shown_date_key() -> str:
+    return datetime.now(LOCAL_TZ).date().isoformat()
+
+
+def shown_scan_item_ids_today() -> set[str]:
+    today = scan_shown_date_key()
+    for date_key in list(SHOWN_SCAN_ITEM_IDS_BY_DATE):
+        if date_key != today:
+            SHOWN_SCAN_ITEM_IDS_BY_DATE.pop(date_key, None)
+    return SHOWN_SCAN_ITEM_IDS_BY_DATE.setdefault(today, set())
+
+
+def scan_item_identity(item: dict) -> str:
+    item_type = item.get("type", "email")
+    if item_type == "appointment":
+        index = item.get("index")
+        if isinstance(index, int) and 1 <= index <= len(PENDING_EMAIL_APPOINTMENTS):
+            source_id = PENDING_EMAIL_APPOINTMENTS[index - 1].get("source_id", "")
+            if source_id:
+                return f"appointment:{source_id}"
+        return f"appointment:{index}"
+    email_item = item.get("email", {})
+    message_id = email_item.get("id", "")
+    if message_id:
+        return f"{item_type}:{message_id}"
+    return f"{item_type}:{email_item.get('sender', '')}:{email_item.get('subject', '')}"
+
+
+def scan_item_was_shown_today(item: dict) -> bool:
+    return scan_item_identity(item) in shown_scan_item_ids_today()
+
+
+def mark_scan_item_shown_today(item: dict) -> None:
+    shown_scan_item_ids_today().add(scan_item_identity(item))
+
+
+def scan_item_text(item: dict) -> str:
+    if item.get("type") == "appointment":
+        index = item.get("index")
+        if isinstance(index, int) and 1 <= index <= len(PENDING_EMAIL_APPOINTMENTS):
+            candidate = PENDING_EMAIL_APPOINTMENTS[index - 1]
+            return " ".join(
+                str(candidate.get(key, ""))
+                for key in ("title", "date", "time", "location", "sender", "description")
+            ).lower()
+        return ""
+    email_item = item.get("email", {})
+    return " ".join(
+        str(email_item.get(key, ""))
+        for key in ("sender", "subject", "snippet", "body")
+    ).lower()
+
+
+def deterministic_scan_item_score(item: dict) -> int:
+    text = scan_item_text(item)
+    score = 0
+    if item.get("type") == "appointment":
+        score += 80
+    elif item.get("type") == "email":
+        score += 40
+    elif item.get("type") == "promo":
+        score += 10
+    score += 30 if any(word in text for word in ("urgent", "asap", "action required", "security", "password")) else 0
+    score += 25 if any(word in text for word in ("deadline", "due today", "due tomorrow", "payment", "invoice")) else 0
+    score += 20 if any(word in text for word in ("meeting", "appointment", "interview", "calendar")) else 0
+    score += min(20, promo_score(item.get("email", {}))) if item.get("type") == "promo" else 0
+    return score
+
+
+def scan_item_ai_summary(item: dict) -> dict:
+    item_id = scan_item_identity(item)
+    if item.get("type") == "appointment":
+        index = item.get("index")
+        candidate = PENDING_EMAIL_APPOINTMENTS[index - 1] if isinstance(index, int) and 1 <= index <= len(PENDING_EMAIL_APPOINTMENTS) else {}
+        return {
+            "id": item_id,
+            "type": "appointment",
+            "title": compact_text(candidate.get("title"), 100),
+            "from": compact_text(candidate.get("sender"), 80),
+            "details": compact_text(candidate.get("description"), 160),
+        }
+    email_item = item.get("email", {})
+    return {
+        "id": item_id,
+        "type": item.get("type", "email"),
+        "subject": compact_text(email_item.get("subject"), 100),
+        "from": compact_text(email_item.get("sender"), 80),
+        "snippet": compact_text(email_item.get("snippet") or email_item.get("body"), 160),
+    }
+
+
+def ai_rank_scan_items(items: list[dict]) -> list[str]:
+    if len(items) < 2:
+        return [scan_item_identity(item) for item in items]
+    lines = [
+        "Rank these Telegram digest items by usefulness for an email/calendar assistant.",
+        "Prefer urgent/security/payment/deadline items, then appointments, then genuinely useful promos.",
+        "Return only a JSON array of ids, best first.",
+    ]
+    for item in items[:10]:
+        lines.append("- " + json.dumps(scan_item_ai_summary(item), ensure_ascii=True))
+    ranked = extract_ranked_ids(ollama_digest_completion("\n".join(lines)))
+    allowed = {scan_item_identity(item) for item in items}
+    return [item_id for item_id in ranked if item_id in allowed]
+
+
+def rank_scan_items(items: list[dict]) -> list[dict]:
+    scored = sorted(items, key=deterministic_scan_item_score, reverse=True)
+    ranked_ids = ai_rank_scan_items(scored)
+    if not ranked_ids:
+        return scored
+    by_id = {scan_item_identity(item): item for item in scored}
+    ranked = [by_id[item_id] for item_id in ranked_ids if item_id in by_id]
+    ranked.extend(item for item in scored if scan_item_identity(item) not in ranked_ids)
+    return ranked
+
+
+def format_important_email_card(email_item: dict) -> str:
+    lines = [
+        "📩 Important Email",
+        "",
+        f"Subject: {display_field(email_item.get('subject') or '(no subject)', 130)}",
+        f"From: {display_field(email_item.get('sender') or 'Unknown', 130)}",
+        "",
+        f"Highlight: {display_field(email_highlight(email_item), 180)}",
+        f"Why: {display_field(email_why_it_matters(email_item), 120)}",
+    ]
+    return clean_card_text(lines)
+
+
+def format_promo_card(email_item: dict) -> str:
+    lines = [
+        "🔥 Promo Pick",
+        "",
+        f"Brand: {display_field(extract_sender_brand(email_item.get('sender', '')), 90)}",
+        f"Offer: {display_field(promo_offer_text(email_item), 150)}",
+        "",
+        "Why: Stronger or more time-sensitive than the other promos.",
+        f"Expires: {display_field(promo_expiry_text(email_item), 90)}",
+    ]
+    return clean_card_text(lines)
+
+
 def format_appointment_candidate(candidate: dict, index: int) -> str:
-    lines = [f"📅 Possible Appointment #{index}"]
-    lines.append(f"Title: {candidate.get('title') or 'Missing'}")
-    lines.append(f"Date: {candidate.get('date') or 'Missing'}")
-    lines.append(f"Time: {candidate.get('time') or 'Missing'}")
-    lines.append(f"Location: {candidate.get('location') or 'Not found'}")
-    lines.append(f"Link: {candidate.get('meeting_link') or 'Not found'}")
-    lines.append(f"From: {candidate.get('sender') or 'Unknown'}")
+    lines = ["📅 Appointment"]
+    lines.append("")
+    lines.append(f"Title: {display_field(candidate.get('title'), 130)}")
+    lines.append(f"Date: {display_field(candidate.get('date'), 80)}")
+    lines.append(f"Time: {display_field(candidate.get('time'), 60)}")
+    lines.append(f"Location: {display_location(candidate.get('location'))}")
+    lines.append(f"From: {display_field(candidate.get('sender') or 'Unknown', 130)}")
+    lines.append(f"Link: {display_field(candidate.get('meeting_link'), 180)}")
+    if candidate.get("description"):
+        lines.append("")
+        lines.append(f"Highlight: {display_field(candidate.get('description'), 180)}")
     missing = missing_candidate_fields(candidate)
     if missing:
         lines.append(f"Missing: {', '.join(missing)}")
-    lines.append("Would you like me to add this to your calendar?")
-    lines.append(f"Use /add {index} or /skip {index}.")
-    return "\n".join(lines)
+    return clean_card_text(lines)
+
+
+def appointment_keyboard(index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Add to Calendar", callback_data=f"appt:add:{index}"),
+                InlineKeyboardButton("⏸ Skip", callback_data=f"appt:skip:{index}"),
+            ],
+        ]
+    )
 
 
 def format_email_card(email_item: dict, candidate: dict | None = None) -> str:
@@ -1122,26 +1550,30 @@ def format_email_card(email_item: dict, candidate: dict | None = None) -> str:
         lines.append("Urgent: Yes")
     lines.append(f"Appointment found: {'Yes' if candidate else 'No'}")
     if candidate:
-        date_text = candidate.get("date") or "Missing"
-        time_text = candidate.get("time") or "Missing"
-        location_text = candidate.get("location") or "Not found"
-        lines.append(f"Details: {date_text} at {time_text}; {location_text}")
+        lines.append(f"Date: {display_field(candidate.get('date'))}")
+        lines.append(f"Time: {display_field(candidate.get('time'))}")
+        lines.append(f"Location: {display_location(candidate.get('location'))}")
     return "\n".join(lines)
 
 
 def pending_email_summary() -> str:
-    if not PENDING_EMAIL_APPOINTMENTS:
+    pending_items = [(index, item) for index, item in enumerate(PENDING_EMAIL_APPOINTMENTS, start=1) if item.get("status", "pending") == "pending"]
+    if not pending_items:
         return "No pending email appointments right now."
     lines = ["Pending email appointments"]
-    for index, candidate in enumerate(PENDING_EMAIL_APPOINTMENTS, start=1):
+    for index, candidate in pending_items:
         lines.append("")
         lines.append(format_appointment_candidate(candidate, index))
     return "\n".join(lines)
 
 
 def scan_recent_email_for_updates() -> dict:
-    emails, errors = fetch_recent_emails()
+    emails, errors = fetch_recent_emails(skip_seen=False)
+    promo_emails, promo_errors = fetch_recent_emails(GMAIL_PROMO_QUERY, skip_seen=False)
+    errors.extend(promo_errors)
     important = [item for item in emails if email_is_important(item)]
+    regular_ids = {item.get("id") for item in emails}
+    promo_picks = choose_promo_picks([item for item in promo_emails if item.get("id") not in regular_ids])
     candidates = []
     candidate_by_source = {}
     existing_sources = {item.get("source_id") for item in PENDING_EMAIL_APPOINTMENTS}
@@ -1153,42 +1585,157 @@ def scan_recent_email_for_updates() -> dict:
                 PENDING_EMAIL_APPOINTMENTS.append(candidate)
                 candidates.append(candidate)
                 existing_sources.add(candidate.get("source_id"))
-    for email_item in emails:
+    for email_item in emails + promo_emails:
         if email_item.get("id"):
             SCANNED_EMAIL_IDS.add(email_item["id"])
     TODAY_IMPORTANT_EMAILS[:] = important[:20]
-    return {"emails": emails, "important": important, "candidates": candidates, "candidate_by_source": candidate_by_source, "errors": errors}
+    return {
+        "emails": emails,
+        "important": important,
+        "promo_picks": promo_picks,
+        "candidates": candidates,
+        "candidate_by_source": candidate_by_source,
+        "errors": errors,
+    }
 
 
 def render_scan_result(result: dict) -> str:
     errors = result.get("errors", [])
     important = result.get("important", [])
     candidates = result.get("candidates", [])
-    candidate_by_source = result.get("candidate_by_source", {})
+    promo_picks = result.get("promo_picks", [])
     lines = [
         "Email scan complete",
-        f"Important emails: {len(important)}",
-        f"Appointment candidates: {len(candidates)}",
+        f"{len(important)} important email{'s' if len(important) != 1 else ''}",
+        f"{len(candidates)} appointment email{'s' if len(candidates) != 1 else ''}",
+        f"{len(promo_picks)} promo pick{'s' if len(promo_picks) != 1 else ''}",
     ]
-    if candidates:
-        lines.append("Reply with /pending to review, then /add <number> or /skip <number>.")
-    if not important:
+    if not important and not promo_picks:
         lines.append("")
-        lines.append("I did not find new important emails in the recent scan.")
-    for email_item in important[:5]:
-        lines.append("")
-        lines.append(format_email_card(email_item, candidate_by_source.get(email_item.get("id"))))
-    if candidates:
-        lines.append("")
-        for index, candidate in enumerate(candidates, start=1):
-            pending_index = PENDING_EMAIL_APPOINTMENTS.index(candidate) + 1 if candidate in PENDING_EMAIL_APPOINTMENTS else index
-            lines.append(format_appointment_candidate(candidate, pending_index))
-            lines.append("")
+        lines.append("I did not find new items worth surfacing in the recent scan.")
     if errors:
         if lines and lines[-1] != "":
             lines.append("")
         lines.extend(f"- {error}" for error in errors[:3])
     return "\n".join(lines).strip()
+
+
+def scan_header_text(total: int, start: int, end: int) -> str:
+    if total <= 0:
+        return "Email scan complete\nTotal items: 0"
+    return f"Email scan complete\nTotal items: {total}\nShowing {start}–{end}"
+
+
+def build_scan_items(result: dict, include_shown: bool = False) -> list[dict]:
+    items = []
+    candidate_by_source = result.get("candidate_by_source", {})
+    for email_item in result.get("important", []):
+        candidate = candidate_by_source.get(email_item.get("id"))
+        if candidate:
+            index = next(
+                (
+                    item_index
+                    for item_index, item in enumerate(PENDING_EMAIL_APPOINTMENTS, start=1)
+                    if item.get("source_id") == email_item.get("id")
+                ),
+                None,
+            )
+            if index:
+                items.append({"type": "appointment", "index": index})
+            continue
+        items.append({"type": "email", "email": email_item, "kind": "important"})
+    for email_item in result.get("promo_picks", []):
+        items.append({"type": "promo", "email": email_item, "kind": "promo"})
+    items = rank_scan_items(items)
+    if include_shown:
+        return items
+    return [item for item in items if not scan_item_was_shown_today(item)]
+
+
+def has_unshown_scan_items(items: list[dict], start: int = 0) -> bool:
+    return any(not scan_item_was_shown_today(item) for item in items[start:])
+
+
+def build_scan_digest() -> dict:
+    result = scan_recent_email_for_updates()
+    all_items = build_scan_items(result, include_shown=True)
+    items = [item for item in all_items if not scan_item_was_shown_today(item)]
+    return {"result": result, "all_items": all_items, "items": items}
+
+
+def build_ranked_digest() -> dict:
+    return build_scan_digest()
+
+
+async def reply_scan_text(message, text: str, reply_markup: InlineKeyboardMarkup | None = None):
+    await message.reply_text(text, reply_markup=reply_markup, disable_web_page_preview=True)
+
+
+async def send_scan_page(message, batch_id: int, start: int = 0) -> bool:
+    batch = SCAN_BATCHES.get(batch_id)
+    if not batch:
+        return False
+    items = batch.get("items", [])
+    total = len(items)
+    page_items = []
+    cursor = start
+    while cursor < total and len(page_items) < SCAN_PAGE_SIZE:
+        item = items[cursor]
+        cursor += 1
+        if scan_item_was_shown_today(item):
+            continue
+        page_items.append(item)
+    if not page_items:
+        batch["offset"] = cursor
+        return False
+    shown_start = start + 1
+    shown_end = cursor
+    await reply_scan_text(message, scan_header_text(total, shown_start, shown_end))
+    for item in page_items:
+        if item.get("type") == "appointment":
+            index = item.get("index")
+            if isinstance(index, int) and 1 <= index <= len(PENDING_EMAIL_APPOINTMENTS):
+                await reply_scan_text(
+                    message,
+                    format_appointment_candidate(PENDING_EMAIL_APPOINTMENTS[index - 1], index)[:4000],
+                    reply_markup=appointment_keyboard(index),
+                )
+                mark_scan_item_shown_today(item)
+            continue
+        email_item = item.get("email", {})
+        card_id = register_email_card(email_item, item.get("kind", "important"))
+        formatter = format_promo_card if item.get("type") == "promo" else format_important_email_card
+        await reply_scan_text(message, formatter(email_item)[:4000], reply_markup=email_card_keyboard(card_id))
+        mark_scan_item_shown_today(item)
+    batch["offset"] = cursor
+    if has_unshown_scan_items(items, cursor):
+        await reply_scan_text(message, "Show more scanned emails?", reply_markup=scan_more_keyboard(batch_id))
+    return True
+
+
+async def send_scan_batch(message, digest: dict | None = None) -> bool:
+    digest = digest or build_scan_digest()
+    result = digest.get("result", {})
+    all_items = digest.get("all_items", [])
+    items = digest.get("items", [])
+    if not all_items:
+        await reply_scan_text(message, render_scan_result(result)[:4000])
+        return False
+    if not items:
+        await reply_scan_text(
+            message,
+            "You've already reviewed today's scanned items here. Scroll up to revisit them, or scan again tomorrow for a fresh set.",
+        )
+        return False
+    batch_id = next_scan_batch_id()
+    SCAN_BATCHES[batch_id] = {"items": items, "offset": 0}
+    sent = await send_scan_page(message, batch_id, 0)
+    if not sent:
+        await reply_scan_text(
+            message,
+            "You've already reviewed today's scanned items here. Scroll up to revisit them, or scan again tomorrow for a fresh set.",
+        )
+    return sent
 
 
 def today_email_summary_text() -> str:
@@ -1208,6 +1755,8 @@ def add_pending_candidate(index: int) -> str:
     if index < 1 or index > len(PENDING_EMAIL_APPOINTMENTS):
         return "That pending item number is not available."
     candidate = PENDING_EMAIL_APPOINTMENTS[index - 1]
+    if candidate.get("status", "pending") != "pending":
+        return handled_candidate_text("add" if candidate.get("status") == "added" else "skip", index)
     validation_error = validate_email_candidate(candidate)
     if validation_error:
         return f"I can’t add this yet.\n\n{validation_error}\n\nUse /pending to review what I found."
@@ -1221,7 +1770,7 @@ def add_pending_candidate(index: int) -> str:
         candidate.get("location", ""),
         [60, 1440],
     )
-    PENDING_EMAIL_APPOINTMENTS.pop(index - 1)
+    candidate["status"] = "added"
     return (
         "✅ Added to your calendar\n\n"
         f"Title: {event.get('summary', candidate['title'])}\n"
@@ -1249,6 +1798,26 @@ def send_evening_summary(send_func=None) -> str:
     if send_func:
         send_func(text)
     return text
+
+
+async def run_scheduled_scan(message, label: str = "Scheduled digest") -> bool:
+    digest = build_ranked_digest()
+    if not digest.get("items"):
+        return False
+    await reply_scan_text(message, label)
+    return await send_scan_batch(message, digest)
+
+
+async def send_morning_email_digest(message) -> bool:
+    return await run_scheduled_scan(message, "Morning email digest")
+
+
+async def send_afternoon_email_digest(message) -> bool:
+    return await run_scheduled_scan(message, "Afternoon email digest")
+
+
+async def send_evening_email_digest(message) -> bool:
+    return await run_scheduled_scan(message, "Evening email digest")
 
 
 def list_calendar_events(days: int = 7, max_results: int = 10) -> list[dict]:
@@ -2289,7 +2858,11 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Not authorized.")
         return
 
-    await update.message.reply_text(render_scan_result(scan_recent_email_for_updates())[:4000])
+    await send_scan_results(update)
+
+
+async def send_scan_results(update: Update) -> None:
+    await send_scan_batch(update.message)
 
 
 async def email_summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2314,6 +2887,141 @@ async def gmail_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     await update.message.reply_text(gmail_status_text()[:4000])
+
+
+def handled_candidate_text(action: str, index: int) -> str:
+    label = "added to your calendar" if action == "add" else "skipped"
+    return f"Appointment #{index} was already {label}."
+
+
+async def appointment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query is None:
+        return
+    if not is_authorized(update):
+        await query.answer("Not authorized.", show_alert=True)
+        return
+
+    parts = (query.data or "").split(":")
+    if len(parts) != 3 or parts[0] != "appt":
+        await query.answer()
+        return
+    action = parts[1]
+    try:
+        index = int(parts[2])
+    except ValueError:
+        await query.answer("That appointment number is not valid.", show_alert=True)
+        return
+
+    if index < 1 or index > len(PENDING_EMAIL_APPOINTMENTS) or PENDING_EMAIL_APPOINTMENTS[index - 1].get("status", "pending") != "pending":
+        await query.answer("That appointment has already been handled.", show_alert=True)
+        return
+
+    if action == "add":
+        reply = add_pending_candidate(index)
+        await query.answer("Added." if reply.startswith("✅") else "Needs more details.", show_alert=not reply.startswith("✅"))
+        if query.message and reply.startswith("✅"):
+            await query.edit_message_reply_markup(reply_markup=appointment_status_keyboard(index, "✅ Added to Calendar", "📅 Saved"))
+        elif query.message:
+            await query.message.reply_text(reply[:4000], disable_web_page_preview=True)
+        return
+
+    if action == "skip":
+        candidate = PENDING_EMAIL_APPOINTMENTS[index - 1]
+        candidate["status"] = "skipped"
+        await query.answer("Skipped.")
+        if query.message:
+            await query.edit_message_reply_markup(reply_markup=appointment_status_keyboard(index, "⏸ Skipped", "📬 Left for later"))
+        return
+
+    await query.answer()
+
+
+async def email_card_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query is None:
+        return
+    if not is_authorized(update):
+        await query.answer("Not authorized.", show_alert=True)
+        return
+
+    parts = (query.data or "").split(":")
+    if len(parts) != 3 or parts[0] != "email":
+        await query.answer()
+        return
+    action = parts[1]
+    try:
+        card_id = int(parts[2])
+    except ValueError:
+        await query.answer("That email card is not valid.", show_alert=True)
+        return
+
+    card = EMAIL_CARDS.get(card_id)
+    if not card or card.get("status") != "pending":
+        await query.answer("That email has already been handled.", show_alert=True)
+        return
+
+    if action == "read":
+        reply = mark_gmail_message_read(card.get("id", ""))
+        if reply.startswith("✅"):
+            card["status"] = "read"
+            await query.answer("Marked as read.")
+            if query.message:
+                await query.edit_message_reply_markup(reply_markup=email_status_keyboard(card_id, "✅ Marked read", "📭 Archived from review"))
+        else:
+            await query.answer("I could not mark that read.", show_alert=True)
+            if query.message:
+                await query.message.reply_text(reply[:4000], disable_web_page_preview=True)
+        return
+
+    if action == "skip":
+        card["status"] = "skipped"
+        await query.answer("Skipped.")
+        if query.message:
+            await query.edit_message_reply_markup(reply_markup=email_status_keyboard(card_id, "⏸ Skipped", "📬 Left unread"))
+        return
+
+    await query.answer()
+
+
+async def scan_more_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query is None:
+        return
+    if not is_authorized(update):
+        await query.answer("Not authorized.", show_alert=True)
+        return
+
+    parts = (query.data or "").split(":")
+    if len(parts) != 3 or parts[0] != "scan" or parts[1] != "more":
+        await query.answer()
+        return
+    try:
+        batch_id = int(parts[2])
+    except ValueError:
+        await query.answer("That scan page is not valid.", show_alert=True)
+        return
+
+    batch = SCAN_BATCHES.get(batch_id)
+    if not batch:
+        await query.answer("That scan is no longer available.", show_alert=True)
+        if query.message:
+            await query.edit_message_reply_markup(reply_markup=None)
+        return
+
+    start = int(batch.get("offset", 0))
+    if start >= len(batch.get("items", [])):
+        await query.answer("No more items.")
+        if query.message:
+            await query.edit_message_reply_markup(reply_markup=None)
+        return
+
+    await query.answer()
+    if query.message:
+        await query.edit_message_reply_markup(reply_markup=None)
+        sent = await send_scan_page(query.message, batch_id, start)
+        if not sent:
+            await query.message.reply_text("No more new scanned emails to show today.", disable_web_page_preview=True)
 
 
 def parse_pending_index(args: list[str]) -> int | None:
@@ -2352,7 +3060,11 @@ async def skip_pending_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if index < 1 or index > len(PENDING_EMAIL_APPOINTMENTS):
         await update.message.reply_text("That pending item number is not available.")
         return
-    candidate = PENDING_EMAIL_APPOINTMENTS.pop(index - 1)
+    candidate = PENDING_EMAIL_APPOINTMENTS[index - 1]
+    if candidate.get("status", "pending") != "pending":
+        await update.message.reply_text(handled_candidate_text("add" if candidate.get("status") == "added" else "skip", index))
+        return
+    candidate["status"] = "skipped"
     await update.message.reply_text(f"Skipped this appointment candidate:\n\n{candidate.get('title', 'Untitled appointment')}")
 
 
@@ -2361,16 +3073,17 @@ async def add_all_pending_command(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text("❌ Not authorized.")
         return
 
-    if not PENDING_EMAIL_APPOINTMENTS:
+    pending_count = sum(1 for item in PENDING_EMAIL_APPOINTMENTS if item.get("status", "pending") == "pending")
+    if not pending_count:
         await update.message.reply_text("No pending email appointments right now.")
         return
 
     added = []
-    kept = []
     for candidate in list(PENDING_EMAIL_APPOINTMENTS):
+        if candidate.get("status", "pending") != "pending":
+            continue
         validation_error = validate_email_candidate(candidate)
         if validation_error:
-            kept.append(candidate)
             continue
         try:
             event = create_calendar_event(
@@ -2383,14 +3096,14 @@ async def add_all_pending_command(update: Update, context: ContextTypes.DEFAULT_
                 candidate.get("location", ""),
                 [60, 1440],
             )
+            candidate["status"] = "added"
             added.append(f"{event_start_text(event)} — {event.get('summary', candidate['title'])}")
         except Exception as e:
-            kept.append(candidate)
             added.append(f"Could not add {candidate.get('title', 'one item')}: {e}")
-    PENDING_EMAIL_APPOINTMENTS[:] = kept
     if not added:
         await update.message.reply_text("I could not add any pending items because they need clearer date and time details.")
         return
+    kept = [item for item in PENDING_EMAIL_APPOINTMENTS if item.get("status", "pending") == "pending"]
     suffix = f"\n\n{len(kept)} item(s) still need clearer details." if kept else ""
     await update.message.reply_text(("Added:\n" + "\n".join(f"- {item}" for item in added) + suffix)[:4000])
 
@@ -2403,6 +3116,112 @@ async def clear_pending_command(update: Update, context: ContextTypes.DEFAULT_TY
     count = len(PENDING_EMAIL_APPOINTMENTS)
     PENDING_EMAIL_APPOINTMENTS.clear()
     await update.message.reply_text(f"Cleared {count} pending appointment{'s' if count != 1 else ''}.")
+
+
+def normalize_intent_text(value: str) -> str:
+    text = value.lower().strip()
+    text = re.sub(r"[^\w\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def pending_candidate_indexes() -> list[int]:
+    return [
+        index
+        for index, candidate in enumerate(PENDING_EMAIL_APPOINTMENTS, start=1)
+        if candidate.get("status", "pending") == "pending"
+    ]
+
+
+def number_from_intent(text: str, verbs: tuple[str, ...]) -> int | None:
+    for verb in verbs:
+        match = re.search(rf"\b{re.escape(verb)}\s+(\d+)\b", text)
+        if match:
+            return int(match.group(1))
+    match = re.search(r"\bappointment\s+(\d+)\b", text)
+    if match and any(verb in text for verb in verbs):
+        return int(match.group(1))
+    return None
+
+
+async def route_assistant_intent(update: Update, user_input: str) -> bool:
+    text = normalize_intent_text(user_input)
+    if not text:
+        return False
+
+    scan_phrases = (
+        "scan emails",
+        "scan email",
+        "check my email",
+        "check my emails",
+        "check my inbox",
+        "scan my inbox",
+        "what s in my email",
+        "whats in my email",
+        "what s important today",
+        "whats important today",
+        "summarize my emails",
+        "summarise my emails",
+    )
+    if any(phrase in text for phrase in scan_phrases):
+        await send_scan_results(update)
+        return True
+
+    status_phrases = ("status", "show status", "system status", "is everything working")
+    if text in status_phrases or any(phrase in text for phrase in status_phrases[1:]):
+        await update.message.reply_text(service_status_text()[:4000])
+        return True
+
+    pending_phrases = (
+        "show pending",
+        "show appointments",
+        "show pending appointments",
+        "what appointments did you find",
+        "what did you find",
+    )
+    if any(phrase in text for phrase in pending_phrases):
+        await update.message.reply_text(pending_email_summary()[:4000])
+        return True
+
+    pending_indexes = pending_candidate_indexes()
+    add_index = number_from_intent(text, ("add", "put"))
+    add_phrases = ("add it", "add this", "put it on my calendar", "add that to my calendar")
+    if add_index is not None or any(phrase in text for phrase in add_phrases):
+        if add_index is None:
+            if len(pending_indexes) == 1:
+                add_index = pending_indexes[0]
+            elif len(pending_indexes) > 1:
+                await update.message.reply_text("I found multiple appointment candidates. Use the button, or say add 1 / skip 1.")
+                return True
+            else:
+                await update.message.reply_text("There is nothing pending to add right now.")
+                return True
+        await update.message.reply_text(add_pending_candidate(add_index)[:4000])
+        return True
+
+    skip_index = number_from_intent(text, ("skip", "dismiss"))
+    skip_phrases = ("skip it", "skip this", "dismiss it")
+    if skip_index is not None or any(phrase in text for phrase in skip_phrases):
+        if skip_index is None:
+            if len(pending_indexes) == 1:
+                skip_index = pending_indexes[0]
+            elif len(pending_indexes) > 1:
+                await update.message.reply_text("I found multiple appointment candidates. Use the button, or say add 1 / skip 1.")
+                return True
+            else:
+                await update.message.reply_text("There is nothing pending to skip right now.")
+                return True
+        if skip_index < 1 or skip_index > len(PENDING_EMAIL_APPOINTMENTS):
+            await update.message.reply_text("That pending item number is not available.")
+            return True
+        candidate = PENDING_EMAIL_APPOINTMENTS[skip_index - 1]
+        if candidate.get("status", "pending") != "pending":
+            await update.message.reply_text(handled_candidate_text("add" if candidate.get("status") == "added" else "skip", skip_index))
+            return True
+        candidate["status"] = "skipped"
+        await update.message.reply_text(f"Skipped this appointment candidate:\n\n{candidate.get('title', 'Untitled appointment')}")
+        return True
+
+    return False
 
 
 async def add_event_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2817,6 +3636,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await continue_event_draft(update, user_input):
         return
 
+    if await route_assistant_intent(update, user_input):
+        remember_message(user.id, "user", user_input)
+        return
+
     try:
         memory_fact = parse_memory_fact(user_input)
         if memory_fact:
@@ -2918,6 +3741,9 @@ def main():
     app.add_handler(CommandHandler("ls", ls_command))
     app.add_handler(CommandHandler("read", read_command))
     app.add_handler(CommandHandler("write", write_command))
+    app.add_handler(CallbackQueryHandler(appointment_callback, pattern=r"^appt:"))
+    app.add_handler(CallbackQueryHandler(email_card_callback, pattern=r"^email:"))
+    app.add_handler(CallbackQueryHandler(scan_more_callback, pattern=r"^scan:more:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("🤖 Bubbles (@bubbles_sys_bot) is running.")
