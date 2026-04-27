@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import platform
@@ -12,6 +13,14 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, MessageHandler, CommandHandler, filters, ContextTypes
+
+try:
+    from mailman import build_mailman_digest as mailman_build_digest
+except Exception as e:
+    mailman_build_digest = None
+    MAILMAN_IMPORT_ERROR = e
+else:
+    MAILMAN_IMPORT_ERROR = None
 
 
 def load_dotenv(path: Path) -> None:
@@ -45,6 +54,8 @@ OLLAMA_MAX_HISTORY_TURNS = int(os.getenv("OLLAMA_MAX_HISTORY_TURNS", "2"))
 OLLAMA_HISTORY_LIMIT = OLLAMA_MAX_HISTORY_TURNS * 2
 OLLAMA_MESSAGE_CHAR_LIMIT = 750
 OLLAMA_PROMPT_CHAR_LIMIT = int(os.getenv("OLLAMA_MAX_PROMPT_CHARS", "1400"))
+OLLAMA_FAILURE_COOLDOWN_THRESHOLD = max(1, int(os.getenv("OLLAMA_FAILURE_COOLDOWN_THRESHOLD", "2")))
+OLLAMA_COOLING_MESSAGE = "My chat brain is cooling down. Email/calendar tools still work."
 
 
 def normalize_ollama_base_url(value: str | None) -> str:
@@ -95,6 +106,13 @@ GOOGLE_OAUTH_SCOPES = CALENDAR_SCOPES + [GMAIL_MODIFY_SCOPE]
 GMAIL_FETCH_LIMIT = max(1, min(int(os.getenv("GMAIL_FETCH_LIMIT", "10")), 25))
 GMAIL_QUERY = os.getenv("GMAIL_QUERY", "newer_than:2d")
 GMAIL_PROMO_QUERY = os.getenv("GMAIL_PROMO_QUERY", "category:promotions newer_than:7d")
+GMAIL_UNREAD_QUERY = os.getenv("GMAIL_UNREAD_QUERY", f"{GMAIL_QUERY} is:unread")
+PROACTIVE_DIGESTS_ENABLED = os.getenv("BUBBLES_PROACTIVE_DIGESTS", "1").strip().lower() in {"1", "true", "yes", "on"}
+MORNING_DIGEST_TIME = os.getenv("BUBBLES_MORNING_DIGEST_TIME", "08:00")
+AFTERNOON_DIGEST_TIME = os.getenv("BUBBLES_AFTERNOON_DIGEST_TIME", "13:00")
+EVENING_DIGEST_TIME = os.getenv("BUBBLES_EVENING_DIGEST_TIME", "19:00")
+DIGEST_CHECK_INTERVAL_SECONDS = max(30, int(os.getenv("BUBBLES_DIGEST_CHECK_SECONDS", "60")))
+LOG_PATH = Path(os.getenv("BUBBLES_LOG_PATH", "logs/bubbles.log"))
 REMINDER_MINUTES = [10, 30, 60, 24 * 60, 7 * 24 * 60]
 PENDING_EVENTS: dict[int, dict] = {}
 PENDING_EMAIL_APPOINTMENTS: list[dict] = []
@@ -102,13 +120,16 @@ EMAIL_CARDS: dict[int, dict] = {}
 NEXT_EMAIL_CARD_ID = 1
 SCAN_BATCHES: dict[int, dict] = {}
 NEXT_SCAN_BATCH_ID = 1
-SHOWN_SCAN_ITEM_IDS_BY_DATE: dict[str, set[str]] = {}
+SHOWN_SCAN_ITEM_IDS_BY_DATE: dict[str, dict[str, set[str]]] = {}
 TODAY_IMPORTANT_EMAILS: list[dict] = []
 SCANNED_EMAIL_IDS: set[str] = set()
+RECENT_ACTIONABLE_ITEMS: list[dict] = []
 CHAT_MEMORY: dict[int, list[dict[str, str]]] = {}
 LAST_OLLAMA_HEALTH: dict | None = None
 OLLAMA_OFFLINE_UNTIL: float = 0
 OLLAMA_LAST_ERROR: str = ""
+OLLAMA_CONSECUTIVE_FAILURES = 0
+OLLAMA_CONSECUTIVE_TIMEOUTS = 0
 SYSTEM_PROMPT = "You are Bubbles, a concise Telegram assistant. Reply briefly."
 try:
     LOCAL_TZ = ZoneInfo(GOOGLE_CALENDAR_TIMEZONE)
@@ -273,22 +294,153 @@ def include_in_ollama_history(item: dict[str, str]) -> bool:
     return not any(marker in content for marker in blocked_markers)
 
 
+def utc_iso_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def log_event(event: str, **fields) -> None:
+    safe_fields = {
+        key: compact_text(str(value), 160)
+        for key, value in fields.items()
+        if value not in ("", None) and key not in {"token", "credential", "body", "secret"}
+    }
+    parts = [utc_iso_now(), event]
+    parts.extend(f"{key}={value}" for key, value in safe_fields.items())
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(" ".join(parts) + "\n")
+    except OSError:
+        pass
+
+
+def read_log_tail(limit: int = 10) -> list[str]:
+    try:
+        lines = LOG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    useful = [line for line in lines if line.strip()]
+    return useful[-limit:]
+
+
+def default_memory() -> dict:
+    return {
+        "appointment_defaults": {},
+        "gmail": {
+            "seen": [],
+            "shown": [],
+            "read": [],
+            "unread": [],
+            "skipped": [],
+            "summarized": [],
+            "calendar_added": [],
+        },
+        "scan": {"last_scan_at": ""},
+        "digest_history": [],
+    }
+
+
+def normalize_memory(data: dict) -> dict:
+    memory = default_memory()
+    if isinstance(data, dict):
+        memory.update(data)
+    if not isinstance(memory.get("appointment_defaults"), dict):
+        memory["appointment_defaults"] = {}
+    gmail = memory.get("gmail") if isinstance(memory.get("gmail"), dict) else {}
+    normalized_gmail = {}
+    for key in ("seen", "shown", "read", "unread", "skipped", "summarized", "calendar_added"):
+        values = gmail.get(key, [])
+        if isinstance(values, set):
+            values = list(values)
+        if not isinstance(values, list):
+            values = []
+        normalized_gmail[key] = sorted({str(value) for value in values if value})
+    memory["gmail"] = normalized_gmail
+    scan = memory.get("scan") if isinstance(memory.get("scan"), dict) else {}
+    memory["scan"] = {"last_scan_at": str(scan.get("last_scan_at", ""))}
+    history = memory.get("digest_history", [])
+    memory["digest_history"] = history[-60:] if isinstance(history, list) else []
+    return memory
+
+
 def load_memory() -> dict:
     if not MEMORY_PATH.exists():
-        return {"appointment_defaults": {}}
+        return default_memory()
     try:
         data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"appointment_defaults": {}}
+        log_event("memory_recovered", reason="missing_or_broken")
+        return default_memory()
     if not isinstance(data, dict):
-        return {"appointment_defaults": {}}
-    data.setdefault("appointment_defaults", {})
-    return data
+        return default_memory()
+    return normalize_memory(data)
 
 
 def save_memory(data: dict) -> None:
-    data.setdefault("appointment_defaults", {})
-    MEMORY_PATH.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    MEMORY_PATH.write_text(json.dumps(normalize_memory(data), indent=2, sort_keys=True), encoding="utf-8")
+
+
+def memory_id_set(section: str) -> set[str]:
+    return set(load_memory().get("gmail", {}).get(section, []))
+
+
+def remember_gmail_id(section: str, message_id: str) -> None:
+    if not message_id:
+        return
+    memory = load_memory()
+    gmail = memory.setdefault("gmail", {})
+    values = set(gmail.get(section, []))
+    values.add(message_id)
+    gmail[section] = sorted(values)
+    save_memory(memory)
+
+
+def remember_gmail_ids(section: str, message_ids: list[str]) -> None:
+    ids = [message_id for message_id in message_ids if message_id]
+    if not ids:
+        return
+    memory = load_memory()
+    gmail = memory.setdefault("gmail", {})
+    values = set(gmail.get(section, []))
+    values.update(ids)
+    gmail[section] = sorted(values)
+    save_memory(memory)
+
+
+def gmail_previously_surfaced_ids() -> set[str]:
+    memory = load_memory().get("gmail", {})
+    surfaced = set()
+    for key in ("shown", "read", "skipped", "summarized", "calendar_added"):
+        surfaced.update(memory.get(key, []))
+    return surfaced
+
+
+def update_last_scan_timestamp() -> None:
+    memory = load_memory()
+    memory.setdefault("scan", {})["last_scan_at"] = utc_iso_now()
+    save_memory(memory)
+
+
+def record_digest_history(label: str, shown_count: int) -> None:
+    memory = load_memory()
+    history = memory.setdefault("digest_history", [])
+    history.append({"at": utc_iso_now(), "label": label, "shown": shown_count})
+    memory["digest_history"] = history[-60:]
+    save_memory(memory)
+
+
+def memory_summary_text() -> str:
+    memory = load_memory()
+    gmail = memory.get("gmail", {})
+    return (
+        "Bubbles memory\n\n"
+        f"Seen emails: {len(gmail.get('seen', []))}\n"
+        f"Shown emails: {len(gmail.get('shown', []))}\n"
+        f"Skipped: {len(gmail.get('skipped', []))}\n"
+        f"Summarized: {len(gmail.get('summarized', []))}\n"
+        f"Calendar-added: {len(gmail.get('calendar_added', []))}\n"
+        f"Last scan: {memory.get('scan', {}).get('last_scan_at') or '—'}"
+    )
 
 
 def appointment_type_from_text(value: str) -> str | None:
@@ -599,17 +751,42 @@ def ollama_brain_state(now: float | None = None) -> str:
     return "cooldown" if ollama_cooldown_remaining(now) > 0 else "online"
 
 
-def mark_ollama_offline(error_type: str, now: float | None = None) -> None:
+def reset_ollama_state() -> None:
     global OLLAMA_OFFLINE_UNTIL
     global OLLAMA_LAST_ERROR
+    global OLLAMA_CONSECUTIVE_FAILURES
+    global OLLAMA_CONSECUTIVE_TIMEOUTS
+    OLLAMA_OFFLINE_UNTIL = 0
+    OLLAMA_LAST_ERROR = ""
+    OLLAMA_CONSECUTIVE_FAILURES = 0
+    OLLAMA_CONSECUTIVE_TIMEOUTS = 0
+
+
+def mark_ollama_failure(error_type: str, timed_out: bool = False, now: float | None = None) -> None:
+    global OLLAMA_OFFLINE_UNTIL
+    global OLLAMA_LAST_ERROR
+    global OLLAMA_CONSECUTIVE_FAILURES
+    global OLLAMA_CONSECUTIVE_TIMEOUTS
     current = current_timestamp() if now is None else now
-    OLLAMA_OFFLINE_UNTIL = current + OLLAMA_COOLDOWN_SECONDS
     OLLAMA_LAST_ERROR = error_type
+    OLLAMA_CONSECUTIVE_FAILURES += 1
+    if timed_out:
+        OLLAMA_CONSECUTIVE_TIMEOUTS += 1
+    if OLLAMA_CONSECUTIVE_FAILURES >= OLLAMA_FAILURE_COOLDOWN_THRESHOLD:
+        OLLAMA_OFFLINE_UNTIL = current + OLLAMA_COOLDOWN_SECONDS
+
+
+def mark_ollama_offline(error_type: str, now: float | None = None) -> None:
+    mark_ollama_failure(error_type, True, now)
 
 
 def mark_ollama_online() -> None:
     global OLLAMA_OFFLINE_UNTIL
+    global OLLAMA_CONSECUTIVE_FAILURES
+    global OLLAMA_CONSECUTIVE_TIMEOUTS
     OLLAMA_OFFLINE_UNTIL = 0
+    OLLAMA_CONSECUTIVE_FAILURES = 0
+    OLLAMA_CONSECUTIVE_TIMEOUTS = 0
 
 
 def print_ollama_diagnostics(diagnostics: dict) -> None:
@@ -663,7 +840,7 @@ def configure_ollama_mode(timeout: int | float = OLLAMA_HEALTH_TIMEOUT_SECONDS) 
 def ask_ollama(user_id: int, user_input: str) -> str:
     global OLLAMA_MODE
     if ollama_cooldown_remaining() > 0:
-        return "I’m a bit overloaded right now. Please try again in a moment."
+        return OLLAMA_COOLING_MESSAGE
 
     try:
         if OLLAMA_MODE == "chat":
@@ -680,14 +857,18 @@ def ask_ollama(user_id: int, user_input: str) -> str:
         mark_ollama_online()
         return parse_ollama_response(data)
     except requests.Timeout as e:
-        mark_ollama_offline(e.__class__.__name__)
-        print(f"Ollama request timed out: {e.__class__.__name__}; cooling down for {OLLAMA_COOLDOWN_SECONDS}s.")
-        return "I’m a bit overloaded right now. Please try again in a moment."
+        mark_ollama_failure(e.__class__.__name__, timed_out=True)
+        log_event("ollama_timeout", error=e.__class__.__name__, failures=OLLAMA_CONSECUTIVE_FAILURES)
+        if ollama_cooldown_remaining() > 0:
+            print(f"Ollama request timed out repeatedly: {e.__class__.__name__}; cooling down for {OLLAMA_COOLDOWN_SECONDS}s.")
+        else:
+            print(f"Ollama request timed out: {e.__class__.__name__}; failure {OLLAMA_CONSECUTIVE_FAILURES}/{OLLAMA_FAILURE_COOLDOWN_THRESHOLD}.")
+        return OLLAMA_COOLING_MESSAGE
     except Exception as e:
-        global OLLAMA_LAST_ERROR
-        OLLAMA_LAST_ERROR = e.__class__.__name__
+        mark_ollama_failure(e.__class__.__name__)
+        log_event("ollama_error", error=e.__class__.__name__)
         print(f"Ollama request failed: {e}")
-        return "I can handle calendar commands, but my chat brain is offline. Check Ollama setup."
+        return OLLAMA_COOLING_MESSAGE
 
 
 def run_command(cmd: list[str]) -> str:
@@ -922,6 +1103,46 @@ def gmail_error_summary(response: requests.Response) -> str:
     return f"Gmail request failed ({response.status_code}): {message or reason or short_body or 'no response body'}"
 
 
+def fetch_gmail_message(message_id: str) -> tuple[dict | None, str | None]:
+    if not message_id:
+        return None, "I could not find that Gmail message."
+    gmail_issue = gmail_configuration_issue()
+    if gmail_issue:
+        return None, f"Gmail is not configured: {gmail_issue}"
+
+    token = gmail_access_token()
+    if not token:
+        return None, "Gmail is not configured: token.json is present, but no valid Gmail access token was available."
+
+    try:
+        detail = requests.get(
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"format": "full"},
+            timeout=20,
+        )
+        if detail.status_code >= 400:
+            return None, gmail_error_summary(detail)
+        data = detail.json()
+        headers = gmail_headers(data)
+        payload = data.get("payload", {}) or {}
+        return (
+            {
+                "id": message_id,
+                "sender": headers.get("from", ""),
+                "subject": headers.get("subject", "(no subject)"),
+                "received_at": headers.get("date", ""),
+                "snippet": data.get("snippet", ""),
+                "body": extract_gmail_text(payload).strip()[:4000],
+                "label_ids": data.get("labelIds", []) or [],
+                "unread": "UNREAD" in (data.get("labelIds", []) or []),
+            },
+            None,
+        )
+    except Exception as e:
+        return None, f"Could not read Gmail message: {e}"
+
+
 def fetch_recent_emails(query: str | None = None, skip_seen: bool = True) -> tuple[list[dict], list[str]]:
     gmail_issue = gmail_configuration_issue()
     if gmail_issue:
@@ -950,55 +1171,44 @@ def fetch_recent_emails(query: str | None = None, skip_seen: bool = True) -> tup
         message_id = item.get("id")
         if not message_id or (skip_seen and message_id in SCANNED_EMAIL_IDS):
             continue
-        try:
-            detail = requests.get(
-                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}",
-                headers={"Authorization": f"Bearer {token}"},
-                params={"format": "full"},
-                timeout=20,
-            )
-            if detail.status_code >= 400:
-                errors.append(gmail_error_summary(detail))
-                continue
-            data = detail.json()
-            headers = gmail_headers(data)
-            payload = data.get("payload", {}) or {}
-            emails.append(
-                {
-                    "id": message_id,
-                    "sender": headers.get("from", ""),
-                    "subject": headers.get("subject", "(no subject)"),
-                    "received_at": headers.get("date", ""),
-                    "snippet": data.get("snippet", ""),
-                    "body": extract_gmail_text(payload).strip()[:4000],
-                }
-            )
-        except Exception as e:
-            errors.append(f"Could not read one Gmail message: {e}")
+        email_item, error = fetch_gmail_message(message_id)
+        if error:
+            errors.append(error)
+            continue
+        emails.append(email_item)
     return emails, errors
 
 
-def mark_gmail_message_read(message_id: str) -> str:
+def set_gmail_message_unread(message_id: str, unread: bool) -> str:
     if not message_id:
         return "I could not find that Gmail message."
     gmail_issue = gmail_configuration_issue()
     if gmail_issue:
-        return f"I can’t mark that read yet. {gmail_issue}"
+        return f"I can’t update that email yet. {gmail_issue}"
     token = gmail_access_token()
     if not token:
-        return "I can’t mark that read because no valid Gmail access token is available."
+        return "I can’t update that email because no valid Gmail access token is available."
+    payload = {"addLabelIds": ["UNREAD"]} if unread else {"removeLabelIds": ["UNREAD"]}
     try:
         response = requests.post(
             f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}/modify",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"removeLabelIds": ["UNREAD"]},
+            json=payload,
             timeout=20,
         )
         if response.status_code >= 400:
             return gmail_error_summary(response)
     except Exception as e:
-        return f"Gmail read update failed: {e}"
-    return "✅ Marked as read."
+        return f"Gmail read state update failed: {e}"
+    return "✅ Marked as unread." if unread else "✅ Marked as read."
+
+
+def mark_gmail_message_read(message_id: str) -> str:
+    return set_gmail_message_unread(message_id, False)
+
+
+def mark_gmail_message_unread(message_id: str) -> str:
+    return set_gmail_message_unread(message_id, True)
 
 
 def email_is_important(email_item: dict) -> bool:
@@ -1057,6 +1267,67 @@ def promo_score(email_item: dict) -> int:
     return score
 
 
+def email_meaning_category(email_item: dict) -> str:
+    text = f"{email_item.get('sender', '')} {email_item.get('subject', '')} {email_item.get('snippet', '')} {email_item.get('body', '')}".lower()
+    sender = email_item.get("sender", "").lower()
+    if any(word in text for word in ("appointment", "meeting", "schedule", "scheduled", "invite", "calendar", "interview")):
+        return "appointment"
+    if any(word in text for word in ("invoice", "payment", "bill", "receipt", "statement", "balance due", "past due")):
+        return "payment"
+    if any(word in text for word in ("deadline", "due today", "due tomorrow", "due by", "expires", "final notice")):
+        return "deadline"
+    if any(word in text for word in ("security", "password", "sign-in", "login", "verification", "2fa", "account alert")):
+        return "security"
+    if not email_is_promotional(email_item) and sender and not any(word in sender for word in ("noreply", "no-reply", "donotreply", "newsletter")):
+        return "personal"
+    if email_is_promotional(email_item):
+        return "promo"
+    return "review"
+
+
+def deterministic_email_action(email_item: dict, candidate: dict | None = None) -> str:
+    if candidate:
+        return "Add to calendar"
+    category = email_meaning_category(email_item)
+    text = f"{email_item.get('subject', '')} {email_item.get('snippet', '')} {email_item.get('body', '')}"
+    if category == "payment":
+        due_match = re.search(r"\b(?:by|before|due)\s+([A-Z][a-z]+day|today|tomorrow|[A-Z][a-z]+\s+\d{1,2})", text, flags=re.IGNORECASE)
+        return f"Pay before {compact_text(due_match.group(1), 40)}" if due_match else "Review payment"
+    if category == "deadline":
+        return "Handle deadline"
+    if category == "security":
+        return "Review security alert"
+    if category == "personal":
+        return "Reply / review"
+    if category == "promo":
+        return "Review / optional" if promo_score(email_item) >= 3 else "Ignore"
+    return "Review / optional"
+
+
+def ai_email_action(email_item: dict, candidate: dict | None = None) -> str:
+    fallback = deterministic_email_action(email_item, candidate)
+    if ollama_cooldown_remaining() > 0:
+        return fallback
+    prompt = (
+        "Infer the single best action for this email. Return only 2-5 words, no punctuation. "
+        "Examples: Add to calendar, Pay before Friday, Review optional, Reply, Ignore.\n"
+        + json.dumps(
+            {
+                "subject": compact_text(email_item.get("subject"), 100),
+                "from": compact_text(email_item.get("sender"), 80),
+                "snippet": compact_text(email_item.get("snippet") or email_item.get("body"), 360),
+                "appointment_found": bool(candidate),
+            },
+            ensure_ascii=True,
+        )
+    )
+    action = compact_text(ollama_digest_completion(prompt), 80)
+    action = re.sub(r"^[\"'-]+|[\"'.-]+$", "", action).strip()
+    if not action or "\n" in action or len(action.split()) > 7:
+        return fallback
+    return action[:80]
+
+
 def ollama_digest_completion(prompt: str) -> str:
     if ollama_cooldown_remaining() > 0:
         return ""
@@ -1076,11 +1347,12 @@ def ollama_digest_completion(prompt: str) -> str:
         mark_ollama_online()
         return parse_ollama_response(data)
     except requests.Timeout as e:
-        mark_ollama_offline(e.__class__.__name__)
-        print(f"Ollama digest ranking timed out: {e.__class__.__name__}; cooling down for {OLLAMA_COOLDOWN_SECONDS}s.")
+        mark_ollama_failure(e.__class__.__name__, timed_out=True)
+        log_event("ollama_timeout", area="digest", error=e.__class__.__name__, failures=OLLAMA_CONSECUTIVE_FAILURES)
+        print(f"Ollama digest ranking timed out: {e.__class__.__name__}.")
     except Exception as e:
-        global OLLAMA_LAST_ERROR
-        OLLAMA_LAST_ERROR = e.__class__.__name__
+        mark_ollama_failure(e.__class__.__name__)
+        log_event("ollama_error", area="digest", error=e.__class__.__name__)
         print(f"Ollama digest ranking failed: {e}")
     return ""
 
@@ -1176,6 +1448,79 @@ def short_email_summary(email_item: dict) -> str:
     return f"{prefix}: {snippet}" if snippet else prefix
 
 
+def fallback_email_summary(email_item: dict) -> tuple[list[str], str]:
+    body = compact_text(email_item.get("body") or email_item.get("snippet"), 700)
+    if not body:
+        return ["No readable body text was available."], "Review / optional"
+    sentences = re.split(r"(?<=[.!?])\s+", body)
+    points = [compact_text(sentence, 150) for sentence in sentences if sentence.strip()][:3]
+    if not points:
+        points = [compact_text(body, 150)]
+    action_needed = "Review if relevant."
+    lowered = body.lower()
+    action_match = re.search(r"\b(?:please|kindly|action required|required|need to|must|reply|confirm|schedule)[^.!\n]{0,180}", body, flags=re.IGNORECASE)
+    if action_match:
+        action_needed = compact_text(action_match.group(0), 120)
+    elif any(word in lowered for word in ("meeting", "appointment", "schedule", "calendar", "interview")):
+        action_needed = "Check calendar action."
+    elif any(word in lowered for word in ("invoice", "payment", "due", "deadline")):
+        action_needed = "Check payment or deadline."
+    return points, action_needed
+
+
+def ollama_email_summary(email_item: dict) -> tuple[list[str], str] | None:
+    if ollama_cooldown_remaining() > 0:
+        return None
+    body = compact_text(email_item.get("body") or email_item.get("snippet"), 1800)
+    if not body:
+        return None
+    prompt = (
+        "Summarize this email for a Telegram assistant.\n"
+        "Return JSON with keys key_points and action. key_points must be 2-3 short strings. action must be one short line.\n"
+        + json.dumps(
+            {
+                "from": email_item.get("sender", ""),
+                "subject": email_item.get("subject", ""),
+                "body": body,
+            },
+            ensure_ascii=True,
+        )
+    )
+    raw = ollama_digest_completion(prompt)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return [compact_text(raw, 150)], deterministic_email_action(email_item)
+    raw_points = data.get("key_points") or data.get("points") or data.get("summary") or []
+    if isinstance(raw_points, str):
+        points = [compact_text(part.strip(" -"), 150) for part in re.split(r"\n+|(?<=[.!?])\s+", raw_points) if part.strip()]
+    elif isinstance(raw_points, list):
+        points = [compact_text(str(point), 150) for point in raw_points if str(point).strip()]
+    else:
+        points = []
+    action_needed = compact_text(str(data.get("action") or data.get("action_needed") or ""), 120)
+    if not points:
+        return None
+    return points[:3], action_needed or deterministic_email_action(email_item)
+
+
+def summarize_email_item(email_item: dict) -> str:
+    summary_parts = ollama_email_summary(email_item) or fallback_email_summary(email_item)
+    points, action_needed = summary_parts
+    bullet_lines = "\n".join(f"- {display_field(point, 150)}" for point in points[:3])
+    return (
+        "🧠 Email Summary\n\n"
+        f"Subject: {display_field(email_item.get('subject') or '(no subject)', 130)}\n"
+        f"From: {display_field(email_item.get('sender') or 'Unknown', 130)}\n\n"
+        "Key points:\n"
+        f"{bullet_lines}\n\n"
+        "Action:\n"
+        f"{display_field(action_needed, 160)}"
+    )
+
+
 def email_highlight(email_item: dict) -> str:
     text = re.sub(r"\s+", " ", (email_item.get("snippet") or email_item.get("body") or "").strip())
     subject = email_item.get("subject", "").strip()
@@ -1245,6 +1590,8 @@ def detect_email_appointment(email_item: dict) -> dict | None:
     time_value = parse_human_time(text)
     link = extract_meeting_link(text)
     location = extract_email_location(text)
+    if looks_like_time(location):
+        location = ""
     title = email_item.get("subject", "").strip() or "Email appointment"
     summary = short_email_summary(email_item)
     return {
@@ -1311,17 +1658,46 @@ def register_email_card(email_item: dict, kind: str) -> int:
     EMAIL_CARDS[card_id] = {
         "id": email_item.get("id", ""),
         "kind": kind,
-        "status": "pending",
+        "scan_identity": email_scan_identity(email_item.get("id", ""), "promo" if kind == "promo" else "email"),
+        "status": "unread" if email_item.get("unread", True) else "read",
         "subject": email_item.get("subject", "(no subject)"),
+        "sender": email_item.get("sender", ""),
+        "snippet": email_item.get("snippet", ""),
+        "body": email_item.get("body", ""),
     }
     return card_id
 
 
+def remember_actionable_item(item_type: str, item_id: int, label: str = "") -> None:
+    RECENT_ACTIONABLE_ITEMS.append({"type": item_type, "id": item_id, "label": label})
+    del RECENT_ACTIONABLE_ITEMS[:-8]
+
+
+def active_email_card_ids() -> list[int]:
+    return [
+        card_id
+        for card_id, card in EMAIL_CARDS.items()
+        if card.get("status") in {"read", "unread"}
+    ]
+
+
+def latest_scan_batch_id() -> int | None:
+    if not SCAN_BATCHES:
+        return None
+    return max(SCAN_BATCHES)
+
+
 def email_card_keyboard(card_id: int) -> InlineKeyboardMarkup:
+    card = EMAIL_CARDS.get(card_id, {})
+    read_label = "✅ Mark Read" if card.get("status", "unread") != "read" else "📬 Mark Unread"
+    read_action = "read" if card.get("status", "unread") != "read" else "unread"
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("✅ Read", callback_data=f"email:read:{card_id}"),
+                InlineKeyboardButton(read_label, callback_data=f"email:{read_action}:{card_id}"),
+                InlineKeyboardButton("🧠 Summarize", callback_data=f"email:summarize:{card_id}"),
+            ],
+            [
                 InlineKeyboardButton("⏸ Skip", callback_data=f"email:skip:{card_id}"),
             ],
         ]
@@ -1373,12 +1749,22 @@ def scan_shown_date_key() -> str:
     return datetime.now(LOCAL_TZ).date().isoformat()
 
 
-def shown_scan_item_ids_today() -> set[str]:
+def scan_daily_state() -> dict[str, set[str]]:
     today = scan_shown_date_key()
     for date_key in list(SHOWN_SCAN_ITEM_IDS_BY_DATE):
         if date_key != today:
             SHOWN_SCAN_ITEM_IDS_BY_DATE.pop(date_key, None)
-    return SHOWN_SCAN_ITEM_IDS_BY_DATE.setdefault(today, set())
+    state = SHOWN_SCAN_ITEM_IDS_BY_DATE.setdefault(today, {})
+    if isinstance(state, set):
+        state = {"shown": state}
+        SHOWN_SCAN_ITEM_IDS_BY_DATE[today] = state
+    for key in ("shown", "read", "skipped", "summarized", "added_to_calendar"):
+        state.setdefault(key, set())
+    return state
+
+
+def shown_scan_item_ids_today() -> set[str]:
+    return scan_daily_state()["shown"]
 
 
 def scan_item_identity(item: dict) -> str:
@@ -1397,12 +1783,42 @@ def scan_item_identity(item: dict) -> str:
     return f"{item_type}:{email_item.get('sender', '')}:{email_item.get('subject', '')}"
 
 
+def scan_item_message_id(item: dict) -> str:
+    if item.get("type") == "appointment":
+        index = item.get("index")
+        if isinstance(index, int) and 1 <= index <= len(PENDING_EMAIL_APPOINTMENTS):
+            return PENDING_EMAIL_APPOINTMENTS[index - 1].get("source_id", "")
+        return ""
+    return item.get("email", {}).get("id", "")
+
+
 def scan_item_was_shown_today(item: dict) -> bool:
-    return scan_item_identity(item) in shown_scan_item_ids_today()
+    return scan_item_processed_today(scan_item_identity(item))
 
 
 def mark_scan_item_shown_today(item: dict) -> None:
-    shown_scan_item_ids_today().add(scan_item_identity(item))
+    mark_scan_item_status_today(scan_item_identity(item), "shown")
+    message_id = scan_item_message_id(item)
+    if message_id:
+        remember_gmail_id("shown", message_id)
+
+
+def scan_item_processed_today(item_id: str) -> bool:
+    state = scan_daily_state()
+    return any(item_id in values for values in state.values())
+
+
+def mark_scan_item_status_today(item_id: str, status: str) -> None:
+    if item_id:
+        scan_daily_state().setdefault(status, set()).add(item_id)
+
+
+def mark_scan_item_action_today(item: dict, status: str) -> None:
+    mark_scan_item_status_today(scan_item_identity(item), status)
+
+
+def email_scan_identity(message_id: str, kind: str = "email") -> str:
+    return f"{kind}:{message_id}" if message_id else ""
 
 
 def scan_item_text(item: dict) -> str:
@@ -1426,11 +1842,20 @@ def deterministic_scan_item_score(item: dict) -> int:
     text = scan_item_text(item)
     score = 0
     if item.get("type") == "appointment":
-        score += 80
+        score += 120
     elif item.get("type") == "email":
-        score += 40
+        category = email_meaning_category(item.get("email", {}))
+        score += {
+            "appointment": 110,
+            "payment": 95,
+            "deadline": 90,
+            "security": 85,
+            "personal": 70,
+            "review": 45,
+            "promo": 20,
+        }.get(category, 45)
     elif item.get("type") == "promo":
-        score += 10
+        score += 20
     score += 30 if any(word in text for word in ("urgent", "asap", "action required", "security", "password")) else 0
     score += 25 if any(word in text for word in ("deadline", "due today", "due tomorrow", "payment", "invoice")) else 0
     score += 20 if any(word in text for word in ("meeting", "appointment", "interview", "calendar")) else 0
@@ -1465,7 +1890,8 @@ def ai_rank_scan_items(items: list[dict]) -> list[str]:
         return [scan_item_identity(item) for item in items]
     lines = [
         "Rank these Telegram digest items by usefulness for an email/calendar assistant.",
-        "Prefer urgent/security/payment/deadline items, then appointments, then genuinely useful promos.",
+        "Priority order: appointments first, then bills/payments, deadlines, security alerts, personal messages, strong promotions last.",
+        "Keep similar items in the given order unless meaning clearly changes priority.",
         "Return only a JSON array of ids, best first.",
     ]
     for item in items[:10]:
@@ -1476,37 +1902,51 @@ def ai_rank_scan_items(items: list[dict]) -> list[str]:
 
 
 def rank_scan_items(items: list[dict]) -> list[dict]:
-    scored = sorted(items, key=deterministic_scan_item_score, reverse=True)
-    ranked_ids = ai_rank_scan_items(scored)
+    scored = sorted(
+        enumerate(items),
+        key=lambda pair: (-deterministic_scan_item_score(pair[1]), scan_item_identity(pair[1]), pair[0]),
+    )
+    scored_items = [item for _, item in scored]
+    ranked_ids = ai_rank_scan_items(scored_items)
     if not ranked_ids:
-        return scored
-    by_id = {scan_item_identity(item): item for item in scored}
+        return scored_items
+    deterministic_position = {scan_item_identity(item): index for index, item in enumerate(scored_items)}
+    ai_position = {item_id: index for index, item_id in enumerate(ranked_ids)}
+    by_id = {scan_item_identity(item): item for item in scored_items}
     ranked = [by_id[item_id] for item_id in ranked_ids if item_id in by_id]
-    ranked.extend(item for item in scored if scan_item_identity(item) not in ranked_ids)
-    return ranked
+    ranked.extend(item for item in scored_items if scan_item_identity(item) not in ranked_ids)
+    return sorted(
+        ranked,
+        key=lambda item: (
+            -deterministic_scan_item_score(item),
+            ai_position.get(scan_item_identity(item), deterministic_position.get(scan_item_identity(item), 999)),
+            deterministic_position.get(scan_item_identity(item), 999),
+        ),
+    )
 
 
 def format_important_email_card(email_item: dict) -> str:
     lines = [
-        "📩 Important Email",
+        "📩 Email",
         "",
         f"Subject: {display_field(email_item.get('subject') or '(no subject)', 130)}",
         f"From: {display_field(email_item.get('sender') or 'Unknown', 130)}",
+        f"Action: {display_field(ai_email_action(email_item), 90)}",
         "",
         f"Highlight: {display_field(email_highlight(email_item), 180)}",
-        f"Why: {display_field(email_why_it_matters(email_item), 120)}",
     ]
     return clean_card_text(lines)
 
 
 def format_promo_card(email_item: dict) -> str:
     lines = [
-        "🔥 Promo Pick",
+        "📩 Promo Pick",
         "",
-        f"Brand: {display_field(extract_sender_brand(email_item.get('sender', '')), 90)}",
+        f"Subject: {display_field(email_item.get('subject') or '(no subject)', 130)}",
+        f"From: {display_field(extract_sender_brand(email_item.get('sender', '')), 90)}",
+        f"Action: {display_field(ai_email_action(email_item), 90)}",
+        "",
         f"Offer: {display_field(promo_offer_text(email_item), 150)}",
-        "",
-        "Why: Stronger or more time-sensitive than the other promos.",
         f"Expires: {display_field(promo_expiry_text(email_item), 90)}",
     ]
     return clean_card_text(lines)
@@ -1516,10 +1956,12 @@ def format_appointment_candidate(candidate: dict, index: int) -> str:
     lines = ["📅 Appointment"]
     lines.append("")
     lines.append(f"Title: {display_field(candidate.get('title'), 130)}")
+    lines.append(f"From: {display_field(candidate.get('sender') or 'Unknown', 130)}")
+    lines.append("Action: Add to calendar")
+    lines.append("")
     lines.append(f"Date: {display_field(candidate.get('date'), 80)}")
     lines.append(f"Time: {display_field(candidate.get('time'), 60)}")
     lines.append(f"Location: {display_location(candidate.get('location'))}")
-    lines.append(f"From: {display_field(candidate.get('sender') or 'Unknown', 130)}")
     lines.append(f"Link: {display_field(candidate.get('meeting_link'), 180)}")
     if candidate.get("description"):
         lines.append("")
@@ -1542,18 +1984,18 @@ def appointment_keyboard(index: int) -> InlineKeyboardMarkup:
 
 
 def format_email_card(email_item: dict, candidate: dict | None = None) -> str:
-    lines = ["📩 Important Email"]
-    lines.append(f"Subject: {email_item.get('subject') or '(no subject)'}")
-    lines.append(f"From: {email_item.get('sender') or 'Unknown'}")
-    lines.append(f"Highlight: {email_highlight(email_item)}")
-    if email_is_urgent(email_item):
-        lines.append("Urgent: Yes")
-    lines.append(f"Appointment found: {'Yes' if candidate else 'No'}")
+    lines = ["📩 Email"]
+    lines.append("")
+    lines.append(f"Subject: {display_field(email_item.get('subject') or '(no subject)', 130)}")
+    lines.append(f"From: {display_field(email_item.get('sender') or 'Unknown', 130)}")
+    lines.append(f"Action: {display_field(ai_email_action(email_item, candidate), 90)}")
+    lines.append("")
+    lines.append(f"Highlight: {display_field(email_highlight(email_item), 180)}")
     if candidate:
         lines.append(f"Date: {display_field(candidate.get('date'))}")
         lines.append(f"Time: {display_field(candidate.get('time'))}")
         lines.append(f"Location: {display_location(candidate.get('location'))}")
-    return "\n".join(lines)
+    return clean_card_text(lines)
 
 
 def pending_email_summary() -> str:
@@ -1567,11 +2009,25 @@ def pending_email_summary() -> str:
     return "\n".join(lines)
 
 
-def scan_recent_email_for_updates() -> dict:
-    emails, errors = fetch_recent_emails(skip_seen=False)
-    promo_emails, promo_errors = fetch_recent_emails(GMAIL_PROMO_QUERY, skip_seen=False)
+def scan_recent_email_for_updates(unread_only: bool = False, persistent_new_only: bool = False) -> dict:
+    query = GMAIL_UNREAD_QUERY if unread_only else GMAIL_QUERY
+    emails, errors = fetch_recent_emails(query, skip_seen=False)
+    promo_query = f"{GMAIL_PROMO_QUERY} is:unread" if unread_only and "is:unread" not in GMAIL_PROMO_QUERY.lower() else GMAIL_PROMO_QUERY
+    promo_emails, promo_errors = fetch_recent_emails(promo_query, skip_seen=False)
     errors.extend(promo_errors)
-    important = [item for item in emails if email_is_important(item)]
+    seen_ids = [item.get("id", "") for item in emails + promo_emails if item.get("id")]
+    remember_gmail_ids("seen", seen_ids)
+    update_last_scan_timestamp()
+    if persistent_new_only:
+        surfaced = gmail_previously_surfaced_ids()
+        emails = [item for item in emails if item.get("id") not in surfaced]
+        promo_emails = [item for item in promo_emails if item.get("id") not in surfaced]
+    assistant_categories = {"appointment", "payment", "deadline", "security", "personal"}
+    important = [
+        item
+        for item in emails
+        if email_is_important(item) or email_meaning_category(item) in assistant_categories
+    ]
     regular_ids = {item.get("id") for item in emails}
     promo_picks = choose_promo_picks([item for item in promo_emails if item.get("id") not in regular_ids])
     candidates = []
@@ -1589,6 +2045,15 @@ def scan_recent_email_for_updates() -> dict:
         if email_item.get("id"):
             SCANNED_EMAIL_IDS.add(email_item["id"])
     TODAY_IMPORTANT_EMAILS[:] = important[:20]
+    log_event(
+        "emails_found",
+        unread_only=unread_only,
+        persistent_new_only=persistent_new_only,
+        emails=len(emails),
+        important=len(important),
+        promos=len(promo_picks),
+        appointments=len(candidates),
+    )
     return {
         "emails": emails,
         "important": important,
@@ -1626,6 +2091,220 @@ def scan_header_text(total: int, start: int, end: int) -> str:
     return f"Email scan complete\nTotal items: {total}\nShowing {start}–{end}"
 
 
+def digest_item_icon(item: dict) -> str:
+    if item.get("type") == "appointment":
+        return "📅"
+    if item.get("type") == "promo":
+        return "🎁"
+    category = email_meaning_category(item.get("email", {}))
+    if category == "payment":
+        return "💸"
+    if category == "security":
+        return "🔐"
+    if category == "deadline":
+        return "🔥"
+    if category == "personal":
+        return "👤"
+    return "📩"
+
+
+def digest_item_title_action(item: dict) -> tuple[str, str]:
+    if item.get("type") == "appointment":
+        index = item.get("index")
+        candidate = PENDING_EMAIL_APPOINTMENTS[index - 1] if isinstance(index, int) and 1 <= index <= len(PENDING_EMAIL_APPOINTMENTS) else {}
+        title = display_field(candidate.get("title"), 90)
+        when = " ".join(part for part in (candidate.get("date", ""), candidate.get("time", "")) if part)
+        if when:
+            title = f"{title} — {compact_text(when, 40)}"
+        return title, "Add to calendar"
+    email_item = item.get("email", {})
+    title = display_field(email_item.get("subject") or extract_sender_brand(email_item.get("sender", "")), 90)
+    return title, ai_email_action(email_item)
+
+
+def scheduled_digest_intro(label: str, items: list[dict]) -> str:
+    greeting = {
+        "morning": "🌅 Morning Digest",
+        "afternoon": "☀️ Afternoon Digest",
+        "evening": "🌙 Evening Digest",
+    }.get(label.lower(), f"{label} Digest")
+    lines = [
+        greeting,
+        "",
+        f"I found {len(items)} new thing{'s' if len(items) != 1 else ''} worth your attention.",
+        "",
+    ]
+    for index, item in enumerate(items[:3], start=1):
+        title, action = digest_item_title_action(item)
+        lines.append(f"{index}. {digest_item_icon(item)} {title}")
+        lines.append(f"   Action: {display_field(action, 80)}")
+        lines.append("")
+    lines.append("I’ll show the top cards now.")
+    return "\n".join(lines).strip()
+
+
+def highlights_group(item: dict) -> str:
+    if item.get("type") == "appointment":
+        return "appointments"
+    if item.get("type") == "promo":
+        return "promos"
+    category = email_meaning_category(item.get("email", {}))
+    if category in {"payment", "deadline", "security"}:
+        return "urgent" if category in {"deadline", "security"} else "payments"
+    if category == "personal":
+        return "personal"
+    return "urgent" if email_is_urgent(item.get("email", {})) else "personal"
+
+
+def highlights_item_text(item: dict) -> tuple[str, str]:
+    if item.get("type") == "appointment":
+        title, _ = digest_item_title_action(item)
+        return title, "Calendar action available in /scan."
+    email_item = item.get("email", {})
+    title = email_item.get("subject") or f"Message from {extract_sender_brand(email_item.get('sender', ''))}"
+    if item.get("type") == "promo":
+        return compact_text(title, 90), compact_text(promo_offer_text(email_item), 100)
+    action = deterministic_email_action(email_item)
+    return compact_text(title, 90), compact_text(action if action != "Review / optional" else email_highlight(email_item), 100)
+
+
+def format_highlights_digest(items: list[dict], result: dict) -> str:
+    groups = {
+        "urgent": ("🔥 Urgent", []),
+        "appointments": ("📅 Appointments", []),
+        "payments": ("💸 Bills & Payments", []),
+        "personal": ("👤 Personal", []),
+        "promos": ("🎁 Promo Picks", []),
+    }
+    for item in items:
+        key = highlights_group(item)
+        groups.setdefault(key, (key.title(), []))[1].append(item)
+
+    lines = ["🧠 Inbox Highlights"]
+    shown_total = 0
+    for _, (heading, group_items) in groups.items():
+        if not group_items:
+            continue
+        lines.append("")
+        lines.append(heading)
+        for index, item in enumerate(group_items[:2], start=1):
+            title, detail = highlights_item_text(item)
+            lines.append(f"{index}. {title}")
+            lines.append(f"   {detail}")
+            shown_total += 1
+    if shown_total == 0:
+        lines.append("")
+        lines.append("No unread highlights stood out in the recent scan.")
+
+    important_count = len(result.get("important", []))
+    appointment_count = len(result.get("candidates", []))
+    payment_count = sum(1 for item in result.get("important", []) if email_meaning_category(item) == "payment")
+    promo_count = len(result.get("promo_picks", []))
+    lines.append("")
+    lines.append("Summary:")
+    lines.append(f"{important_count} important · {appointment_count} appointments · {payment_count} payments · {promo_count} promos")
+    return "\n".join(lines)[:4000]
+
+
+def mailman_summary_line(summary: dict, key: str, singular: str, emoji: str, plural: str | None = None) -> str:
+    count = int(summary.get(key, 0) or 0)
+    noun = singular if count == 1 else (plural or f"{singular}s")
+    return f"{emoji} {count} {noun}"
+
+
+def render_mailman_digest(digest: dict) -> str:
+    log_event("Bubbles rendering Mailman digest")
+    summary = digest.get("summary", {}) if isinstance(digest.get("summary"), dict) else {}
+    items = digest.get("items", []) if isinstance(digest.get("items"), list) else []
+    errors = digest.get("errors", []) if isinstance(digest.get("errors"), list) else []
+
+    lines = [
+        "🧠 Mailman Highlights",
+        "",
+        "📊 Summary",
+        f"📩 {int(summary.get('total', 0) or 0)} unread",
+        mailman_summary_line(summary, "appointments", "appointment", "📅"),
+        mailman_summary_line(summary, "bills", "bill", "💸", "bills"),
+        mailman_summary_line(summary, "security", "security", "🔐", "security"),
+    ]
+
+    if errors and not items:
+        first_error = errors[0] if isinstance(errors[0], dict) else {}
+        message = first_error.get("message") if isinstance(first_error, dict) else str(errors[0])
+        lines.extend(["", f"Mailman issue: {compact_text(str(message), 220)}"])
+        return "\n".join(lines)[:4000]
+
+    if not items:
+        lines.extend(["", "No unread highlights stood out."])
+        return "\n".join(lines)[:4000]
+
+    lines.extend(["", "🔥 Top Priority", ""])
+    for index, item in enumerate(items[:3], start=1):
+        if not isinstance(item, dict):
+            continue
+        title = display_field(item.get("subject"), 90)
+        sender = display_field(item.get("from_display") or item.get("from"), 90)
+        why = display_field(item.get("why_it_matters"), 120)
+        action = display_field(item.get("action"), 90)
+        emoji = item.get("emoji") or "📩"
+        lines.extend(
+            [
+                f"{index}. {emoji} {title}",
+                f"   From: {sender}",
+                f"   Why: {why}",
+                f"   Action: {action}",
+                "",
+            ]
+        )
+
+    if lines and lines[-1] == "":
+        lines.pop()
+    if errors:
+        lines.extend(["", f"Note: Mailman reported {len(errors)} account issue{'s' if len(errors) != 1 else ''}."])
+    return "\n".join(lines)[:4000]
+
+
+def call_mailman_digest(unread_only: bool = True, limit: int | None = None) -> dict:
+    if mailman_build_digest is None:
+        detail = f": {MAILMAN_IMPORT_ERROR}" if MAILMAN_IMPORT_ERROR else ""
+        raise RuntimeError(f"Mailman is not available{detail}")
+    log_event("Bubbles calling Mailman")
+    digest = mailman_build_digest(unread_only=unread_only, limit=limit)
+    items = digest.get("items", []) if isinstance(digest, dict) else []
+    item_count = len(items) if isinstance(items, list) else 0
+    log_event("Mailman returned X items", count=item_count)
+    return digest
+
+
+def build_mailman_highlights_digest() -> str:
+    return render_mailman_digest(call_mailman_digest(unread_only=True))
+
+
+def build_legacy_highlights_digest() -> str:
+    result = scan_recent_email_for_updates(unread_only=True, persistent_new_only=False)
+    items = build_scan_items(result, include_shown=True)
+    for item in items[:10]:
+        message_id = scan_item_message_id(item)
+        if message_id:
+            remember_gmail_id("shown", message_id)
+    log_event("highlights_built", items=len(items), important=len(result.get("important", [])))
+    return format_highlights_digest(items[:8], result)
+
+
+def build_highlights_digest() -> str:
+    try:
+        text = build_mailman_highlights_digest()
+        log_event("mailman_highlights_built")
+        return text
+    except Exception as e:
+        log_event("mailman_highlights_failed", error=e.__class__.__name__)
+        try:
+            legacy = build_legacy_highlights_digest()
+            return f"Mailman highlights are unavailable right now. Showing legacy highlights.\n\n{legacy}"[:4000]
+        except Exception:
+            return f"Mailman highlights are unavailable right now: {compact_text(str(e), 220)}"
+
+
 def build_scan_items(result: dict, include_shown: bool = False) -> list[dict]:
     items = []
     candidate_by_source = result.get("candidate_by_source", {})
@@ -1656,8 +2335,8 @@ def has_unshown_scan_items(items: list[dict], start: int = 0) -> bool:
     return any(not scan_item_was_shown_today(item) for item in items[start:])
 
 
-def build_scan_digest() -> dict:
-    result = scan_recent_email_for_updates()
+def build_scan_digest(unread_only: bool = False, persistent_new_only: bool = False) -> dict:
+    result = scan_recent_email_for_updates(unread_only=unread_only, persistent_new_only=persistent_new_only)
     all_items = build_scan_items(result, include_shown=True)
     items = [item for item in all_items if not scan_item_was_shown_today(item)]
     return {"result": result, "all_items": all_items, "items": items}
@@ -1667,8 +2346,26 @@ def build_ranked_digest() -> dict:
     return build_scan_digest()
 
 
+def build_proactive_digest() -> dict:
+    return build_scan_digest(unread_only=True, persistent_new_only=True)
+
+
 async def reply_scan_text(message, text: str, reply_markup: InlineKeyboardMarkup | None = None):
     await message.reply_text(text, reply_markup=reply_markup, disable_web_page_preview=True)
+
+
+class BotMessageTarget:
+    def __init__(self, bot, chat_id: int):
+        self.bot = bot
+        self.chat_id = chat_id
+
+    async def reply_text(self, text: str, reply_markup: InlineKeyboardMarkup | None = None, disable_web_page_preview: bool = True):
+        await self.bot.send_message(
+            chat_id=self.chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview,
+        )
 
 
 async def send_scan_page(message, batch_id: int, start: int = 0) -> bool:
@@ -1701,23 +2398,29 @@ async def send_scan_page(message, batch_id: int, start: int = 0) -> bool:
                     reply_markup=appointment_keyboard(index),
                 )
                 mark_scan_item_shown_today(item)
+                remember_actionable_item("appointment", index, PENDING_EMAIL_APPOINTMENTS[index - 1].get("title", ""))
+                log_event("card_shown", type="appointment", message_id=scan_item_message_id(item))
             continue
         email_item = item.get("email", {})
         card_id = register_email_card(email_item, item.get("kind", "important"))
         formatter = format_promo_card if item.get("type") == "promo" else format_important_email_card
         await reply_scan_text(message, formatter(email_item)[:4000], reply_markup=email_card_keyboard(card_id))
         mark_scan_item_shown_today(item)
+        remember_actionable_item("email", card_id, email_item.get("subject", ""))
+        log_event("card_shown", type=item.get("type", "email"), message_id=email_item.get("id", ""))
     batch["offset"] = cursor
-    if has_unshown_scan_items(items, cursor):
+    if batch.get("allow_more", True) and has_unshown_scan_items(items, cursor):
         await reply_scan_text(message, "Show more scanned emails?", reply_markup=scan_more_keyboard(batch_id))
     return True
 
 
-async def send_scan_batch(message, digest: dict | None = None) -> bool:
+async def send_scan_batch(message, digest: dict | None = None, allow_more: bool = True, limit: int | None = None) -> bool:
     digest = digest or build_scan_digest()
     result = digest.get("result", {})
     all_items = digest.get("all_items", [])
     items = digest.get("items", [])
+    if limit is not None:
+        items = items[:limit]
     if not all_items:
         await reply_scan_text(message, render_scan_result(result)[:4000])
         return False
@@ -1728,7 +2431,7 @@ async def send_scan_batch(message, digest: dict | None = None) -> bool:
         )
         return False
     batch_id = next_scan_batch_id()
-    SCAN_BATCHES[batch_id] = {"items": items, "offset": 0}
+    SCAN_BATCHES[batch_id] = {"items": items, "offset": 0, "allow_more": allow_more}
     sent = await send_scan_page(message, batch_id, 0)
     if not sent:
         await reply_scan_text(
@@ -1771,6 +2474,8 @@ def add_pending_candidate(index: int) -> str:
         [60, 1440],
     )
     candidate["status"] = "added"
+    remember_gmail_id("calendar_added", candidate.get("source_id", ""))
+    log_event("calendar_event_added", source_id=candidate.get("source_id", ""), title=candidate.get("title", ""))
     return (
         "✅ Added to your calendar\n\n"
         f"Title: {event.get('summary', candidate['title'])}\n"
@@ -1800,24 +2505,130 @@ def send_evening_summary(send_func=None) -> str:
     return text
 
 
-async def run_scheduled_scan(message, label: str = "Scheduled digest") -> bool:
-    digest = build_ranked_digest()
-    if not digest.get("items"):
+async def run_scheduled_email_scan(message, label: str = "Scheduled email scan", proactive: bool = False) -> bool:
+    log_event("scheduled_scan_started", label=label, proactive=proactive)
+    digest = build_proactive_digest() if proactive else build_ranked_digest()
+    items = digest.get("items", [])[:3]
+    if not items:
+        log_event("scheduled_scan_finished", label=label, shown=0)
         return False
-    await reply_scan_text(message, label)
-    return await send_scan_batch(message, digest)
+    await reply_scan_text(message, scheduled_digest_intro(label.split()[0], items))
+    sent = await send_scan_batch(message, digest, allow_more=False, limit=3)
+    record_digest_history(label, len(items) if sent else 0)
+    log_event("scheduled_scan_finished", label=label, shown=len(items) if sent else 0)
+    return sent
+
+
+async def run_scheduled_scan(message, label: str = "Scheduled digest") -> bool:
+    return await run_scheduled_email_scan(message, label)
+
+
+async def run_morning_digest(message) -> bool:
+    return await run_scheduled_email_scan(message, "Morning email digest")
+
+
+async def run_afternoon_digest(message) -> bool:
+    return await run_scheduled_email_scan(message, "Afternoon email digest")
+
+
+async def run_evening_digest(message) -> bool:
+    return await run_scheduled_email_scan(message, "Evening email digest")
+
+
+async def run_proactive_digest_message(message, label: str) -> bool:
+    return await run_scheduled_email_scan(message, label, proactive=True)
 
 
 async def send_morning_email_digest(message) -> bool:
-    return await run_scheduled_scan(message, "Morning email digest")
+    return await run_morning_digest(message)
 
 
 async def send_afternoon_email_digest(message) -> bool:
-    return await run_scheduled_scan(message, "Afternoon email digest")
+    return await run_afternoon_digest(message)
 
 
 async def send_evening_email_digest(message) -> bool:
-    return await run_scheduled_scan(message, "Evening email digest")
+    return await run_evening_digest(message)
+
+
+def parse_digest_time(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", value or "")
+    if not match:
+        return 8, 0
+    hour = max(0, min(int(match.group(1)), 23))
+    minute = max(0, min(int(match.group(2)), 59))
+    return hour, minute
+
+
+def digest_schedule() -> dict[str, str]:
+    return {
+        "morning": MORNING_DIGEST_TIME,
+        "afternoon": AFTERNOON_DIGEST_TIME,
+        "evening": EVENING_DIGEST_TIME,
+    }
+
+
+def schedule_status_text() -> str:
+    enabled = "yes" if PROACTIVE_DIGESTS_ENABLED else "no"
+    return (
+        "Proactive digests\n\n"
+        f"Enabled: {enabled}\n"
+        f"Morning: {MORNING_DIGEST_TIME}\n"
+        f"Afternoon: {AFTERNOON_DIGEST_TIME}\n"
+        f"Evening: {EVENING_DIGEST_TIME}\n"
+        f"Timezone: {GOOGLE_CALENDAR_TIMEZONE}"
+    )
+
+
+def digest_run_key(label: str, date_key: str) -> str:
+    return f"{date_key}:{label}"
+
+
+def digest_already_ran(label: str, date_key: str) -> bool:
+    key = digest_run_key(label, date_key)
+    return any(item.get("key") == key for item in load_memory().get("digest_history", []) if isinstance(item, dict))
+
+
+def mark_digest_ran(label: str, date_key: str, shown_count: int) -> None:
+    memory = load_memory()
+    history = memory.setdefault("digest_history", [])
+    history.append({"key": digest_run_key(label, date_key), "at": utc_iso_now(), "label": label, "shown": shown_count})
+    memory["digest_history"] = history[-60:]
+    save_memory(memory)
+
+
+async def run_proactive_digest(application, label: str) -> bool:
+    if ALLOWED_USER_ID is None:
+        return False
+    target = BotMessageTarget(application.bot, ALLOWED_USER_ID)
+    sent = await run_scheduled_email_scan(target, f"{label.title()} email digest", proactive=True)
+    if label == "evening" and not sent:
+        log_event("scheduled_scan_empty", label=label)
+    return sent
+
+
+async def proactive_digest_loop(application) -> None:
+    log_event("scheduler_started", enabled=PROACTIVE_DIGESTS_ENABLED)
+    while PROACTIVE_DIGESTS_ENABLED:
+        now = datetime.now(LOCAL_TZ)
+        date_key = now.date().isoformat()
+        for label, time_value in digest_schedule().items():
+            hour, minute = parse_digest_time(time_value)
+            scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            window_end = scheduled + timedelta(minutes=60)
+            if scheduled <= now < window_end and not digest_already_ran(label, date_key):
+                try:
+                    sent = await run_proactive_digest(application, label)
+                    mark_digest_ran(label, date_key, 1 if sent else 0)
+                except Exception as e:
+                    log_event("scheduled_scan_error", label=label, error=e.__class__.__name__)
+        await asyncio.sleep(DIGEST_CHECK_INTERVAL_SECONDS)
+
+
+async def start_background_tasks(application) -> None:
+    log_event("startup", proactive=PROACTIVE_DIGESTS_ENABLED)
+    if PROACTIVE_DIGESTS_ENABLED:
+        application.create_task(proactive_digest_loop(application))
 
 
 def list_calendar_events(days: int = 7, max_results: int = 10) -> list[dict]:
@@ -2703,8 +3514,10 @@ def safe_ollama_text() -> str:
         f"Model installed: {model_installed}\n"
         f"Chat brain state: {state}{cooldown_suffix}\n"
         f"Last error type: {last_error}\n"
+        f"Consecutive failures: {OLLAMA_CONSECUTIVE_FAILURES}\n"
+        f"Consecutive timeouts: {OLLAMA_CONSECUTIVE_TIMEOUTS}\n"
         f"Timeouts: connect {OLLAMA_CONNECT_TIMEOUT_SECONDS}s, read {OLLAMA_READ_TIMEOUT_SECONDS}s\n"
-        f"Cooldown: {OLLAMA_COOLDOWN_SECONDS}s\n"
+        f"Cooldown: {OLLAMA_COOLDOWN_SECONDS}s after {OLLAMA_FAILURE_COOLDOWN_THRESHOLD} failure(s)\n"
         f"Prompt caps: {OLLAMA_MAX_HISTORY_TURNS} turns, {OLLAMA_PROMPT_CHAR_LIMIT} chars"
     )
 
@@ -2730,7 +3543,8 @@ def safe_about_text() -> str:
         f"Timezone: {GOOGLE_CALENDAR_TIMEZONE}\n"
         f"Enabled features: {', '.join(enabled_features())}; dev commands {dev_status}\n\n"
         "Commands: /start, /about, /helpme, /ollama, /brain, /id, /status, /calendar [days], /next, "
-        "/free [days], /scan, /gmailstatus, /summary, /pending, /add, /skip, /addall, /clearpending, "
+        "/free [days], /scan, /highlights, /assistanttest, /scheduledtest, /rundigest, /schedule, "
+        "/memory, /logtail, /gmailstatus, /summary, /pending, /add, /skip, /addall, /clearpending, /resetbrain, "
         "/add_event, /calendar_setup, /ls, /read, /write.\n\n"
         "Natural requests: create or schedule calendar events, show upcoming appointments, "
         "ask for the next appointment, ask for the next available day, and save usual "
@@ -2756,6 +3570,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/next\n"
         "/free [days]\n"
         "/scan\n"
+        "/highlights\n"
+        "/assistanttest\n"
+        "/scheduledtest\n"
+        "/rundigest\n"
+        "/schedule\n"
+        "/memory\n"
+        "/logtail\n"
         "/gmailstatus\n"
         "/summary\n"
         "/pending\n"
@@ -2763,6 +3584,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/skip <number>\n"
         "/addall\n"
         "/clearpending\n"
+        "/resetbrain\n"
         "/add_event <title> | <date> | <reminders yes/no> | <reminder count> | [description]\n"
         "/calendar_setup\n"
         "/ls [path]\n"
@@ -2787,6 +3609,15 @@ async def ollama_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(safe_ollama_text()[:4000])
+
+
+async def resetbrain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    reset_ollama_state()
+    await update.message.reply_text("Chat brain cooldown cleared.")
 
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2858,7 +3689,147 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Not authorized.")
         return
 
+    log_event("manual_scan_started")
     await send_scan_results(update)
+    log_event("manual_scan_finished")
+
+
+async def scheduledtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    sent = await run_scheduled_email_scan(update.message, "Scheduled email scan test")
+    if not sent:
+        await update.message.reply_text("No new scheduled email items to show right now.", disable_web_page_preview=True)
+
+
+async def assistanttest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    sent = await run_morning_digest(update.message)
+    if not sent:
+        await update.message.reply_text("No new assistant digest items to show right now.", disable_web_page_preview=True)
+
+
+async def rundigest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    sent = await run_proactive_digest_message(update.message, "Manual email digest")
+    if not sent:
+        await update.message.reply_text("No new digest items right now.", disable_web_page_preview=True)
+
+
+async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    await update.message.reply_text(schedule_status_text()[:4000], disable_web_page_preview=True)
+
+
+async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    await update.message.reply_text(memory_summary_text()[:4000], disable_web_page_preview=True)
+
+
+async def logtail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    lines = read_log_tail(10)
+    await update.message.reply_text("\n".join(lines)[:4000] if lines else "No log lines found.", disable_web_page_preview=True)
+
+
+def workflow_text() -> str:
+    return (
+        "🧭 Bubbles ↔ Mailman Workflow\n\n"
+        "1. You send a Telegram command to Bubbles\n"
+        "2. Bubbles decides whether email intelligence is needed\n"
+        "3. Bubbles calls Mailman\n"
+        "4. Mailman scans Gmail and builds a ranked digest\n"
+        "5. Mailman returns structured data to Bubbles\n"
+        "6. Bubbles formats the digest into Telegram messages\n"
+        "7. You approve actions with buttons\n\n"
+        "Current setup:\n"
+        "Bubbles: Telegram UI + actions\n"
+        "Mailman: Email scanning + ranking + summaries"
+    )
+
+
+async def workflow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    await update.message.reply_text(workflow_text()[:4000], disable_web_page_preview=True)
+
+
+def render_mailman_test_result(digest: dict) -> str:
+    log_event("Bubbles rendering Mailman digest")
+    summary = digest.get("summary", {}) if isinstance(digest.get("summary"), dict) else {}
+    items = digest.get("items", []) if isinstance(digest.get("items"), list) else []
+    errors = digest.get("errors", []) if isinstance(digest.get("errors"), list) else []
+    lines = [
+        "🧪 Mailman Test",
+        "",
+        "Status: succeeded" if not errors else "Status: succeeded with account issues",
+        "",
+        "Summary:",
+        f"📩 {int(summary.get('total', 0) or 0)} unread",
+        mailman_summary_line(summary, "appointments", "appointment", "📅"),
+        mailman_summary_line(summary, "bills", "bill", "💸", "bills"),
+        mailman_summary_line(summary, "security", "security", "🔐", "security"),
+        mailman_summary_line(summary, "promos", "promo", "🎁"),
+    ]
+    if items:
+        lines.extend(["", "First items:"])
+        for index, item in enumerate(items[:2], start=1):
+            if not isinstance(item, dict):
+                continue
+            title = display_field(item.get("subject"), 90)
+            item_type = display_field(item.get("type"), 40)
+            priority = display_field(item.get("priority"), 40)
+            emoji = item.get("emoji") or "📩"
+            lines.append(f"{index}. {emoji} {title}")
+            lines.append(f"   Type: {item_type} · Priority: {priority}")
+    else:
+        lines.extend(["", "First items: none"])
+    if errors:
+        lines.extend(["", f"Account issues: {len(errors)}"])
+    return "\n".join(lines)[:4000]
+
+
+async def mailmantest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    try:
+        digest = call_mailman_digest(unread_only=True)
+        await update.message.reply_text(render_mailman_test_result(digest), disable_web_page_preview=True)
+    except Exception as e:
+        log_event("mailman_test_failed", error=e.__class__.__name__)
+        await update.message.reply_text(
+            f"Mailman test failed: {compact_text(str(e), 220)}",
+            disable_web_page_preview=True,
+        )
+
+
+async def highlights_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        await update.message.reply_text("❌ Not authorized.")
+        return
+
+    await update.message.reply_text(build_highlights_digest(), disable_web_page_preview=True)
 
 
 async def send_scan_results(update: Update) -> None:
@@ -2921,6 +3892,7 @@ async def appointment_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         reply = add_pending_candidate(index)
         await query.answer("Added." if reply.startswith("✅") else "Needs more details.", show_alert=not reply.startswith("✅"))
         if query.message and reply.startswith("✅"):
+            mark_scan_item_action_today({"type": "appointment", "index": index}, "added_to_calendar")
             await query.edit_message_reply_markup(reply_markup=appointment_status_keyboard(index, "✅ Added to Calendar", "📅 Saved"))
         elif query.message:
             await query.message.reply_text(reply[:4000], disable_web_page_preview=True)
@@ -2929,6 +3901,9 @@ async def appointment_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if action == "skip":
         candidate = PENDING_EMAIL_APPOINTMENTS[index - 1]
         candidate["status"] = "skipped"
+        remember_gmail_id("skipped", candidate.get("source_id", ""))
+        mark_scan_item_action_today({"type": "appointment", "index": index}, "skipped")
+        log_event("appointment_skipped", source_id=candidate.get("source_id", ""), title=candidate.get("title", ""))
         await query.answer("Skipped.")
         if query.message:
             await query.edit_message_reply_markup(reply_markup=appointment_status_keyboard(index, "⏸ Skipped", "📬 Left for later"))
@@ -2957,28 +3932,63 @@ async def email_card_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     card = EMAIL_CARDS.get(card_id)
-    if not card or card.get("status") != "pending":
-        await query.answer("That email has already been handled.", show_alert=True)
+    if not card:
+        await query.answer("That email card is no longer available.", show_alert=True)
         return
 
     if action == "read":
         reply = mark_gmail_message_read(card.get("id", ""))
         if reply.startswith("✅"):
             card["status"] = "read"
-            await query.answer("Marked as read.")
+            remember_gmail_id("read", card.get("id", ""))
+            mark_scan_item_status_today(card.get("scan_identity", ""), "read")
+            log_event("email_read", message_id=card.get("id", ""))
+            await query.answer()
             if query.message:
-                await query.edit_message_reply_markup(reply_markup=email_status_keyboard(card_id, "✅ Marked read", "📭 Archived from review"))
+                await query.edit_message_reply_markup(reply_markup=email_card_keyboard(card_id))
         else:
             await query.answer("I could not mark that read.", show_alert=True)
             if query.message:
                 await query.message.reply_text(reply[:4000], disable_web_page_preview=True)
         return
 
+    if action == "unread":
+        reply = mark_gmail_message_unread(card.get("id", ""))
+        if reply.startswith("✅"):
+            card["status"] = "unread"
+            remember_gmail_id("unread", card.get("id", ""))
+            log_event("email_unread", message_id=card.get("id", ""))
+            await query.answer()
+            if query.message:
+                await query.edit_message_reply_markup(reply_markup=email_card_keyboard(card_id))
+        else:
+            await query.answer("I could not mark that unread.", show_alert=True)
+            if query.message:
+                await query.message.reply_text(reply[:4000], disable_web_page_preview=True)
+        return
+
+    if action == "summarize":
+        email_item, error = fetch_gmail_message(card.get("id", ""))
+        if error:
+            email_item = card
+        else:
+            card.update(email_item)
+        remember_gmail_id("summarized", card.get("id", ""))
+        mark_scan_item_status_today(card.get("scan_identity", ""), "summarized")
+        log_event("email_summarized", message_id=card.get("id", ""))
+        await query.answer()
+        if query.message:
+            await query.message.reply_text(summarize_email_item(email_item)[:4000], disable_web_page_preview=True)
+        return
+
     if action == "skip":
         card["status"] = "skipped"
-        await query.answer("Skipped.")
+        remember_gmail_id("skipped", card.get("id", ""))
+        mark_scan_item_status_today(card.get("scan_identity", ""), "skipped")
+        log_event("email_skipped", message_id=card.get("id", ""))
+        await query.answer()
         if query.message:
-            await query.edit_message_reply_markup(reply_markup=email_status_keyboard(card_id, "⏸ Skipped", "📬 Left unread"))
+            await query.edit_message_reply_markup(reply_markup=email_card_keyboard(card_id))
         return
 
     await query.answer()
@@ -3065,6 +4075,8 @@ async def skip_pending_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(handled_candidate_text("add" if candidate.get("status") == "added" else "skip", index))
         return
     candidate["status"] = "skipped"
+    remember_gmail_id("skipped", candidate.get("source_id", ""))
+    log_event("appointment_skipped", source_id=candidate.get("source_id", ""), title=candidate.get("title", ""))
     await update.message.reply_text(f"Skipped this appointment candidate:\n\n{candidate.get('title', 'Untitled appointment')}")
 
 
@@ -3097,6 +4109,8 @@ async def add_all_pending_command(update: Update, context: ContextTypes.DEFAULT_
                 [60, 1440],
             )
             candidate["status"] = "added"
+            remember_gmail_id("calendar_added", candidate.get("source_id", ""))
+            log_event("calendar_event_added", source_id=candidate.get("source_id", ""), title=candidate.get("title", ""))
             added.append(f"{event_start_text(event)} — {event.get('summary', candidate['title'])}")
         except Exception as e:
             added.append(f"Could not add {candidate.get('title', 'one item')}: {e}")
@@ -3143,10 +4157,191 @@ def number_from_intent(text: str, verbs: tuple[str, ...]) -> int | None:
     return None
 
 
+def assistant_help_text() -> str:
+    return (
+        "I can help with:\n"
+        "📩 Email — scan, summarize, mark read/unread\n"
+        "📅 Calendar — detect appointments and add them with approval\n"
+        "🧠 Digests — show what needs attention\n"
+        "🔔 Automation — morning/afternoon/evening checks\n"
+        "🖥️ System — show bot/server status\n\n"
+        "Try saying:\n"
+        "\"check my email\"\n"
+        "\"anything important?\"\n"
+        "\"show my highlights\"\n"
+        "\"add that to my calendar\""
+    )
+
+
+def last_relevant_actionable(item_type: str | None = None) -> dict | None:
+    for item in reversed(RECENT_ACTIONABLE_ITEMS):
+        if item_type and item.get("type") != item_type:
+            continue
+        if item.get("type") == "appointment":
+            index = int(item.get("id", 0))
+            if 1 <= index <= len(PENDING_EMAIL_APPOINTMENTS) and PENDING_EMAIL_APPOINTMENTS[index - 1].get("status", "pending") == "pending":
+                return item
+        if item.get("type") == "email":
+            card_id = int(item.get("id", 0))
+            if card_id in EMAIL_CARDS and EMAIL_CARDS[card_id].get("status") in {"read", "unread"}:
+                return item
+    return None
+
+
+def actionable_indexes(item_type: str) -> list[int]:
+    if item_type == "appointment":
+        return pending_candidate_indexes()
+    if item_type == "email":
+        return active_email_card_ids()
+    return []
+
+
+def resolve_action_target(text: str, action: str, item_type: str) -> tuple[int | None, str | None]:
+    explicit = number_from_intent(text, (action, "mark", "summarize", "summarise", "skip", "add", "put", "leave"))
+    candidates = actionable_indexes(item_type)
+    if explicit is not None:
+        return explicit, None
+    last = last_relevant_actionable(item_type)
+    if last and len(candidates) <= 1:
+        return int(last["id"]), None
+    if len(candidates) == 1:
+        return candidates[0], None
+    if len(candidates) > 1:
+        return None, "I found multiple items. Say add 1, skip 2, summarize 3, or use the buttons."
+    return None, "I don’t have a current item for that yet. Try asking me to check your email."
+
+
+async def add_appointment_from_intent(update: Update, index: int) -> None:
+    await update.message.reply_text(add_pending_candidate(index)[:4000], disable_web_page_preview=True)
+
+
+async def skip_appointment_from_intent(update: Update, index: int) -> None:
+    if index < 1 or index > len(PENDING_EMAIL_APPOINTMENTS):
+        await update.message.reply_text("That pending item number is not available.")
+        return
+    candidate = PENDING_EMAIL_APPOINTMENTS[index - 1]
+    if candidate.get("status", "pending") != "pending":
+        await update.message.reply_text(handled_candidate_text("add" if candidate.get("status") == "added" else "skip", index))
+        return
+    candidate["status"] = "skipped"
+    remember_gmail_id("skipped", candidate.get("source_id", ""))
+    mark_scan_item_action_today({"type": "appointment", "index": index}, "skipped")
+    log_event("appointment_skipped", source_id=candidate.get("source_id", ""), title=candidate.get("title", ""))
+    await update.message.reply_text(f"Skipped this appointment candidate:\n\n{candidate.get('title', 'Untitled appointment')}", disable_web_page_preview=True)
+
+
+async def email_card_action_from_intent(update: Update, card_id: int, action: str) -> None:
+    card = EMAIL_CARDS.get(card_id)
+    if not card:
+        await update.message.reply_text("I don’t have a current item for that yet. Try asking me to check your email.")
+        return
+    if action == "read":
+        reply = mark_gmail_message_read(card.get("id", ""))
+        if reply.startswith("✅"):
+            card["status"] = "read"
+            remember_gmail_id("read", card.get("id", ""))
+            mark_scan_item_status_today(card.get("scan_identity", ""), "read")
+            log_event("email_read", message_id=card.get("id", ""))
+            await update.message.reply_text("Marked read.")
+        else:
+            await update.message.reply_text(reply[:4000], disable_web_page_preview=True)
+        return
+    if action == "unread":
+        reply = mark_gmail_message_unread(card.get("id", ""))
+        if reply.startswith("✅"):
+            card["status"] = "unread"
+            remember_gmail_id("unread", card.get("id", ""))
+            log_event("email_unread", message_id=card.get("id", ""))
+            await update.message.reply_text("Left unread.")
+        else:
+            await update.message.reply_text(reply[:4000], disable_web_page_preview=True)
+        return
+    if action == "summarize":
+        email_item, error = fetch_gmail_message(card.get("id", ""))
+        if error:
+            email_item = card
+        else:
+            card.update(email_item)
+        remember_gmail_id("summarized", card.get("id", ""))
+        mark_scan_item_status_today(card.get("scan_identity", ""), "summarized")
+        log_event("email_summarized", message_id=card.get("id", ""))
+        await update.message.reply_text(summarize_email_item(email_item)[:4000], disable_web_page_preview=True)
+        return
+    if action == "skip":
+        card["status"] = "skipped"
+        remember_gmail_id("skipped", card.get("id", ""))
+        mark_scan_item_status_today(card.get("scan_identity", ""), "skipped")
+        log_event("email_skipped", message_id=card.get("id", ""))
+        await update.message.reply_text("Skipped.")
+
+
+async def show_more_from_intent(update: Update) -> None:
+    batch_id = latest_scan_batch_id()
+    if batch_id is None:
+        await update.message.reply_text("I don’t have more emails queued. Try asking me to check your email.")
+        return
+    batch = SCAN_BATCHES.get(batch_id, {})
+    start = int(batch.get("offset", 0))
+    if start >= len(batch.get("items", [])):
+        await update.message.reply_text("No more new scanned emails to show today.", disable_web_page_preview=True)
+        return
+    sent = await send_scan_page(update.message, batch_id, start)
+    if not sent:
+        await update.message.reply_text("No more new scanned emails to show today.", disable_web_page_preview=True)
+
+
 async def route_assistant_intent(update: Update, user_input: str) -> bool:
     text = normalize_intent_text(user_input)
     if not text:
         return False
+
+    help_phrases = ("help", "help me", "what can you do", "what do you do", "capabilities", "how can you help")
+    if text in help_phrases or any(phrase in text for phrase in help_phrases[1:]):
+        await update.message.reply_text(assistant_help_text()[:4000], disable_web_page_preview=True)
+        return True
+
+    reset_phrases = ("reset your brain", "reset brain", "clear your brain", "clear brain")
+    if any(phrase in text for phrase in reset_phrases):
+        reset_ollama_state()
+        await update.message.reply_text("Chat brain cooldown cleared.")
+        return True
+
+    status_phrases = ("status", "show status", "system status", "are you working", "is everything working", "are you online")
+    if text in status_phrases or any(phrase in text for phrase in status_phrases[1:]):
+        await update.message.reply_text(service_status_text()[:4000], disable_web_page_preview=True)
+        return True
+
+    if any(phrase in text for phrase in ("show more", "show more emails", "more emails", "next emails")):
+        await show_more_from_intent(update)
+        return True
+
+    highlights_phrases = (
+        "show me my highlights",
+        "show my highlights",
+        "email highlights",
+        "inbox highlights",
+        "highlights",
+    )
+    if any(phrase in text for phrase in highlights_phrases):
+        await update.message.reply_text("I’ll pull the latest highlights.", disable_web_page_preview=True)
+        await update.message.reply_text(build_highlights_digest(), disable_web_page_preview=True)
+        return True
+
+    digest_phrases = (
+        "run my digest",
+        "run digest",
+        "morning digest",
+        "afternoon digest",
+        "evening digest",
+        "evening recap",
+        "daily digest",
+        "what needs my attention",
+    )
+    if any(phrase in text for phrase in digest_phrases):
+        sent = await run_proactive_digest_message(update.message, "Manual email digest")
+        if not sent:
+            await update.message.reply_text("No new digest items right now.", disable_web_page_preview=True)
+        return True
 
     scan_phrases = (
         "scan emails",
@@ -3155,70 +4350,108 @@ async def route_assistant_intent(update: Update, user_input: str) -> bool:
         "check my emails",
         "check my inbox",
         "scan my inbox",
+        "anything important",
+        "anything new",
         "what s in my email",
         "whats in my email",
         "what s important today",
         "whats important today",
+        "summarize my inbox",
         "summarize my emails",
         "summarise my emails",
     )
     if any(phrase in text for phrase in scan_phrases):
+        await update.message.reply_text("Checking now.", disable_web_page_preview=True)
         await send_scan_results(update)
         return True
 
-    status_phrases = ("status", "show status", "system status", "is everything working")
-    if text in status_phrases or any(phrase in text for phrase in status_phrases[1:]):
-        await update.message.reply_text(service_status_text()[:4000])
+    if "what did you find" in text:
+        if pending_candidate_indexes():
+            await update.message.reply_text(pending_email_summary()[:4000], disable_web_page_preview=True)
+        else:
+            await update.message.reply_text(build_highlights_digest(), disable_web_page_preview=True)
         return True
 
     pending_phrases = (
+        "any appointments",
         "show pending",
         "show appointments",
         "show pending appointments",
+        "appointments",
         "what appointments did you find",
-        "what did you find",
     )
     if any(phrase in text for phrase in pending_phrases):
-        await update.message.reply_text(pending_email_summary()[:4000])
+        await update.message.reply_text(pending_email_summary()[:4000], disable_web_page_preview=True)
         return True
 
-    pending_indexes = pending_candidate_indexes()
     add_index = number_from_intent(text, ("add", "put"))
-    add_phrases = ("add it", "add this", "put it on my calendar", "add that to my calendar")
+    add_phrases = (
+        "add it",
+        "add this",
+        "add that",
+        "add that appointment",
+        "add the appointment",
+        "add it to my calendar",
+        "add that to my calendar",
+        "put it on my calendar",
+        "put that on my calendar",
+    )
     if add_index is not None or any(phrase in text for phrase in add_phrases):
         if add_index is None:
-            if len(pending_indexes) == 1:
-                add_index = pending_indexes[0]
-            elif len(pending_indexes) > 1:
-                await update.message.reply_text("I found multiple appointment candidates. Use the button, or say add 1 / skip 1.")
+            add_index, problem = resolve_action_target(text, "add", "appointment")
+            if problem:
+                await update.message.reply_text(problem)
                 return True
-            else:
-                await update.message.reply_text("There is nothing pending to add right now.")
-                return True
-        await update.message.reply_text(add_pending_candidate(add_index)[:4000])
+        await add_appointment_from_intent(update, add_index)
         return True
 
-    skip_index = number_from_intent(text, ("skip", "dismiss"))
-    skip_phrases = ("skip it", "skip this", "dismiss it")
+    skip_email_phrases = ("skip this email", "skip that email", "skip email", "dismiss this email")
+    if any(phrase in text for phrase in skip_email_phrases):
+        card_id, problem = resolve_action_target(text, "skip", "email")
+        if problem:
+            await update.message.reply_text(problem)
+            return True
+        await email_card_action_from_intent(update, card_id, "skip")
+        return True
+
+    skip_index = number_from_intent(text, ("skip", "dismiss", "leave"))
+    skip_phrases = ("skip it", "skip this", "dismiss it", "skip that appointment", "leave that appointment")
     if skip_index is not None or any(phrase in text for phrase in skip_phrases):
         if skip_index is None:
-            if len(pending_indexes) == 1:
-                skip_index = pending_indexes[0]
-            elif len(pending_indexes) > 1:
-                await update.message.reply_text("I found multiple appointment candidates. Use the button, or say add 1 / skip 1.")
+            skip_index, problem = resolve_action_target(text, "skip", "appointment")
+            if problem:
+                await update.message.reply_text(problem)
                 return True
-            else:
-                await update.message.reply_text("There is nothing pending to skip right now.")
-                return True
-        if skip_index < 1 or skip_index > len(PENDING_EMAIL_APPOINTMENTS):
-            await update.message.reply_text("That pending item number is not available.")
+        await skip_appointment_from_intent(update, skip_index)
+        return True
+
+    if any(phrase in text for phrase in ("mark it read", "mark this read", "mark that read", "mark email read")):
+        card_id, problem = resolve_action_target(text, "read", "email")
+        if problem:
+            await update.message.reply_text(problem)
             return True
-        candidate = PENDING_EMAIL_APPOINTMENTS[skip_index - 1]
-        if candidate.get("status", "pending") != "pending":
-            await update.message.reply_text(handled_candidate_text("add" if candidate.get("status") == "added" else "skip", skip_index))
+        await email_card_action_from_intent(update, card_id, "read")
+        return True
+
+    if any(phrase in text for phrase in ("mark it unread", "mark this unread", "mark that unread", "leave it unread", "leave this unread")):
+        card_id, problem = resolve_action_target(text, "unread", "email")
+        if problem:
+            await update.message.reply_text(problem)
             return True
-        candidate["status"] = "skipped"
-        await update.message.reply_text(f"Skipped this appointment candidate:\n\n{candidate.get('title', 'Untitled appointment')}")
+        await email_card_action_from_intent(update, card_id, "unread")
+        return True
+
+    if any(phrase in text for phrase in ("summarize this email", "summarize that email", "summarize it", "summarise it", "summarize this", "summarise this")):
+        card_id, problem = resolve_action_target(text, "summarize", "email")
+        if problem:
+            await update.message.reply_text(problem)
+            return True
+        await email_card_action_from_intent(update, card_id, "summarize")
+        return True
+
+    tool_words = ("email", "inbox", "appointment", "calendar", "digest", "highlight", "read", "unread", "summarize", "summarise")
+    if any(word in text for word in tool_words):
+        await update.message.reply_text("I can help with that, but I need a clearer action. Try “check my email” or “show my highlights”.")
         return True
 
     return False
@@ -3350,7 +4583,7 @@ async def write_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_text(update: Update, text: str, remember: bool = True) -> None:
-    await update.message.reply_text(text[:4000])
+    await update.message.reply_text(text[:4000], disable_web_page_preview=True)
     user = update.effective_user
     if remember and user is not None:
         remember_message(user.id, "assistant", text[:4000])
@@ -3717,17 +4950,27 @@ def main():
         f"prompt_chars={OLLAMA_PROMPT_CHAR_LIMIT}"
     )
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(start_background_tasks).build()
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler(["about", "helpme"], about_command))
     app.add_handler(CommandHandler(["ollama", "brain"], ollama_command))
+    app.add_handler(CommandHandler("resetbrain", resetbrain_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("calendar", calendar_command))
     app.add_handler(CommandHandler("next", next_command))
     app.add_handler(CommandHandler("free", free_command))
     app.add_handler(CommandHandler("scan", scan_command))
+    app.add_handler(CommandHandler("highlights", highlights_command))
+    app.add_handler(CommandHandler("assistanttest", assistanttest_command))
+    app.add_handler(CommandHandler("scheduledtest", scheduledtest_command))
+    app.add_handler(CommandHandler("rundigest", rundigest_command))
+    app.add_handler(CommandHandler("schedule", schedule_command))
+    app.add_handler(CommandHandler("memory", memory_command))
+    app.add_handler(CommandHandler("logtail", logtail_command))
+    app.add_handler(CommandHandler("workflow", workflow_command))
+    app.add_handler(CommandHandler("mailmantest", mailmantest_command))
     app.add_handler(CommandHandler("gmailstatus", gmail_status_command))
     app.add_handler(CommandHandler("summary", email_summary_command))
     app.add_handler(CommandHandler("pending", pending_command))

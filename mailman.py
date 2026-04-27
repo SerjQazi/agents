@@ -1,17 +1,34 @@
 import json
 import os
 import re
+import sys
 from base64 import urlsafe_b64decode
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
-from env_utils import load_dotenv
+
+def load_dotenv(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            values[key] = value
+    return values
+
 
 for _env_key, _env_value in load_dotenv(Path(__file__).with_name(".env")).items():
     os.environ.setdefault(_env_key, _env_value)
@@ -27,8 +44,64 @@ GMAIL_ACCOUNTS = [item.strip() for item in os.getenv("GMAIL_ACCOUNTS", "").split
 OUTLOOK_ACCOUNTS = [item.strip() for item in os.getenv("OUTLOOK_ACCOUNTS", "").split(",") if item.strip()]
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+GOOGLE_CREDENTIALS_PATH = Path(os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json"))
+GOOGLE_TOKEN_PATH = Path(os.getenv("GOOGLE_TOKEN_PATH", "token.json"))
+GOOGLE_CALENDAR_TIMEZONE = os.getenv("GOOGLE_CALENDAR_TIMEZONE", "America/Toronto")
+GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 GMAIL_FETCH_LIMIT = max(1, min(int(os.getenv("GMAIL_FETCH_LIMIT", "10")), 25))
 GMAIL_QUERY = os.getenv("GMAIL_QUERY", "newer_than:2d")
+GMAIL_UNREAD_QUERY = os.getenv("GMAIL_UNREAD_QUERY", f"{GMAIL_QUERY} is:unread")
+try:
+    LOCAL_TZ = ZoneInfo(GOOGLE_CALENDAR_TIMEZONE)
+except ZoneInfoNotFoundError:
+    LOCAL_TZ = timezone.utc
+
+MONTHS = {
+    "january": 1,
+    "jan": 1,
+    "february": 2,
+    "feb": 2,
+    "march": 3,
+    "mar": 3,
+    "april": 4,
+    "apr": 4,
+    "may": 5,
+    "june": 6,
+    "jun": 6,
+    "july": 7,
+    "jul": 7,
+    "august": 8,
+    "aug": 8,
+    "september": 9,
+    "sep": 9,
+    "sept": 9,
+    "october": 10,
+    "oct": 10,
+    "november": 11,
+    "nov": 11,
+    "december": 12,
+    "dec": 12,
+}
+WEEKDAYS = {
+    "monday": 0,
+    "mon": 0,
+    "tuesday": 1,
+    "tue": 1,
+    "tues": 1,
+    "wednesday": 2,
+    "wed": 2,
+    "thursday": 3,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "friday": 4,
+    "fri": 4,
+    "saturday": 5,
+    "sat": 5,
+    "sunday": 6,
+    "sun": 6,
+}
 
 
 @dataclass
@@ -42,6 +115,8 @@ class EmailItem:
     received_at: str
     snippet: str
     raw_body: str = ""
+    label_ids: tuple[str, ...] = ()
+    unread: bool = False
 
 
 @dataclass
@@ -285,6 +360,78 @@ def env_first(*names: str) -> str:
     return ""
 
 
+def token_data(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def token_scopes(path: Path) -> set[str]:
+    scopes = token_data(path).get("scopes", [])
+    if isinstance(scopes, str):
+        return set(scopes.split())
+    if isinstance(scopes, list):
+        return {str(scope) for scope in scopes}
+    return set()
+
+
+def token_has_gmail_access(path: Path) -> bool:
+    scopes = token_scopes(path)
+    return GMAIL_MODIFY_SCOPE in scopes or GMAIL_READONLY_SCOPE in scopes
+
+
+def token_account(path: Path) -> str:
+    value = token_data(path).get("account", "")
+    return str(value).strip()
+
+
+def gmail_account_name() -> str:
+    return os.getenv("GMAIL_ACCOUNT", "").strip() or token_account(GOOGLE_TOKEN_PATH) or "primary"
+
+
+def gmail_configuration_issue() -> str:
+    if os.getenv("GMAIL_ACCESS_TOKEN", "").strip() or os.getenv("GMAIL_TOKEN", "").strip():
+        return ""
+    if not GOOGLE_TOKEN_PATH.exists():
+        return f"{GOOGLE_TOKEN_PATH} is missing. Run python3 bubbles.py --google-auth and complete Google OAuth."
+    if not token_has_gmail_access(GOOGLE_TOKEN_PATH):
+        return (
+            f"{GOOGLE_TOKEN_PATH} is present, but Gmail access scope is missing. "
+            f"Delete {GOOGLE_TOKEN_PATH}, run python3 bubbles.py --google-auth, then complete Google OAuth again."
+        )
+    return ""
+
+
+def gmail_access_token() -> tuple[str, str]:
+    direct_token = os.getenv("GMAIL_ACCESS_TOKEN", "").strip() or os.getenv("GMAIL_TOKEN", "").strip()
+    if direct_token:
+        return direct_token, ""
+
+    issue = gmail_configuration_issue()
+    if issue:
+        return "", issue
+
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+    except ImportError:
+        return "", "Google auth libraries are not installed. Run: pip install -r requirements.txt"
+
+    scopes = token_scopes(GOOGLE_TOKEN_PATH)
+    scope = GMAIL_MODIFY_SCOPE if GMAIL_MODIFY_SCOPE in scopes else GMAIL_READONLY_SCOPE
+    try:
+        creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN_PATH), [scope])
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        if creds and creds.valid and creds.token:
+            return creds.token, ""
+    except Exception as exc:
+        return "", f"Gmail token could not be loaded: {exc.__class__.__name__}"
+    return "", "Gmail token is present, but no valid access token was available."
+
+
 def get_google_access_token(account: str, provider: str) -> str:
     account_key = slugify(account)
     provider_key = provider.upper()
@@ -327,22 +474,22 @@ def get_google_access_token(account: str, provider: str) -> str:
     return resp.json().get("access_token", "")
 
 
-def fetch_gmail_messages(account: str) -> tuple[list[EmailItem], Optional[str]]:
+def fetch_gmail_messages(account: str, query: str | None = None, token: str | None = None) -> tuple[list[EmailItem], Optional[str]]:
     try:
-        token = get_google_access_token(account, "gmail")
+        token = token or get_google_access_token(account, "gmail")
     except Exception as exc:
         return [], f"Gmail auth failed for {account}: {exc}"
     if not token:
         return [], (
             f"Gmail auth is not configured for {account}. Set either "
             f"GMAIL_TOKEN_{slugify(account)} or GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET plus "
-            f"GMAIL_REFRESH_TOKEN_{slugify(account)}."
+            f"GMAIL_REFRESH_TOKEN_{slugify(account)}, or authorize {GOOGLE_TOKEN_PATH} with Gmail access."
         )
     try:
         resp = requests.get(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages",
             headers={"Authorization": f"Bearer {token}"},
-            params={"maxResults": GMAIL_FETCH_LIMIT, "q": GMAIL_QUERY},
+            params={"maxResults": GMAIL_FETCH_LIMIT, "q": query or GMAIL_QUERY},
             timeout=60,
         )
         resp.raise_for_status()
@@ -360,6 +507,7 @@ def fetch_gmail_messages(account: str) -> tuple[list[EmailItem], Optional[str]]:
             headers = gmail_headers(data)
             payload = data.get("payload", {}) or {}
             raw_body = extract_gmail_text(payload).strip() or data.get("snippet", "")
+            label_ids = tuple(str(label) for label in data.get("labelIds", []) or [])
             items.append(
                 EmailItem(
                     provider="gmail",
@@ -371,6 +519,8 @@ def fetch_gmail_messages(account: str) -> tuple[list[EmailItem], Optional[str]]:
                     received_at=headers.get("date", ""),
                     snippet=data.get("snippet", ""),
                     raw_body=raw_body[:5000],
+                    label_ids=label_ids,
+                    unread="UNREAD" in label_ids,
                 )
             )
         return items, None
@@ -428,6 +578,399 @@ def load_recent_mail() -> tuple[list[EmailItem], list[AccountError]]:
 
 def slugify(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", value).strip("_").upper()
+
+
+def compact_text(value: str | None, limit: int = 160) -> str:
+    text = re.sub(r"\s+", " ", (value or "").strip())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def email_text(item: EmailItem) -> str:
+    return f"{item.sender} {item.subject} {item.snippet} {item.raw_body}".lower()
+
+
+def visible_email_text(item: EmailItem) -> str:
+    return f"{item.subject}\n{item.snippet}\n{item.raw_body}"
+
+
+def sender_display(sender: str) -> str:
+    sender = sender.strip()
+    match = re.search(r"([^<]+)<", sender)
+    if match:
+        return compact_text(match.group(1).strip().strip('"'), 80)
+    if "@" in sender:
+        domain = sender.split("@", 1)[1].split(">", 1)[0]
+        return compact_text(domain.split(".", 1)[0].replace("-", " ").title(), 80)
+    return compact_text(sender, 80) or "Unknown"
+
+
+def next_month_day(month: int, day: int) -> str:
+    today = datetime.now(LOCAL_TZ).date()
+    year = today.year
+    candidate = datetime(year, month, day).date()
+    if candidate < today:
+        candidate = datetime(year + 1, month, day).date()
+    return candidate.isoformat()
+
+
+def next_weekday(weekday: int) -> str:
+    today = datetime.now(LOCAL_TZ).date()
+    days_ahead = (weekday - today.weekday()) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    return (today + timedelta(days=days_ahead)).isoformat()
+
+
+def parse_human_date(value: str) -> str:
+    text = value.strip().lower().replace(",", " ")
+    text = re.sub(r"\s+", " ", text)
+    today = datetime.now(LOCAL_TZ).date()
+
+    if re.search(r"\btoday\b", text):
+        return today.isoformat()
+    if re.search(r"\btomorrow\b", text):
+        return (today + timedelta(days=1)).isoformat()
+
+    iso_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+    if iso_match:
+        return iso_match.group(1)
+
+    for day_month in re.finditer(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?([a-z]+)\b", text):
+        if day_month.group(2) in MONTHS:
+            return next_month_day(MONTHS[day_month.group(2)], int(day_month.group(1)))
+
+    for month_day in re.finditer(r"\b([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?\b", text):
+        if month_day.group(1) in MONTHS:
+            return next_month_day(MONTHS[month_day.group(1)], int(month_day.group(2)))
+
+    for weekday_match in re.finditer(r"\b(?:next\s+)?([a-z]+)\b", text):
+        if weekday_match.group(1) in WEEKDAYS:
+            return next_weekday(WEEKDAYS[weekday_match.group(1)])
+
+    return ""
+
+
+def parse_human_time(value: str) -> str:
+    text = value.strip().lower()
+    text = text.replace("a.m.", "am").replace("a.m", "am")
+    text = text.replace("p.m.", "pm").replace("p.m", "pm")
+    text = re.sub(r"\ba\s*\.?\s*m\.?\b", "am", text)
+    text = re.sub(r"\bp\s*\.?\s*m\.?\b", "pm", text)
+
+    am_pm = re.search(r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text)
+    if am_pm:
+        hour = int(am_pm.group(1))
+        minute = int(am_pm.group(2) or "0")
+        marker = am_pm.group(3)
+        if hour == 12:
+            hour = 0
+        if marker == "pm":
+            hour += 12
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+
+    named_period = re.search(r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s+in\s+the\s+(evening|afternoon|morning)\b", text)
+    if named_period:
+        hour = int(named_period.group(1))
+        minute = int(named_period.group(2) or "0")
+        period = named_period.group(3)
+        if period in {"evening", "afternoon"} and hour < 12:
+            hour += 12
+        if period == "morning" and hour == 12:
+            hour = 0
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+
+    twenty_four = re.search(r"\b(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)\b", text)
+    if twenty_four:
+        return f"{int(twenty_four.group(1)):02d}:{int(twenty_four.group(2)):02d}"
+
+    return ""
+
+
+def looks_like_time(value: str) -> bool:
+    value = value.strip().lower()
+    return bool(re.fullmatch(r"\d{1,2}(:\d{2})?\s*(am|pm)?", value) or re.fullmatch(r"\d{1,2}\s*(am|pm)", value))
+
+
+def extract_meeting_link(text: str) -> str:
+    match = re.search(r"https?://\S*(?:zoom|meet\.google|teams|webex|calendar)\S*", text, flags=re.IGNORECASE)
+    if not match:
+        match = re.search(r"https?://\S+", text, flags=re.IGNORECASE)
+    return match.group(0).rstrip(").,") if match else ""
+
+
+def extract_email_location(text: str) -> str:
+    link = extract_meeting_link(text)
+    if link:
+        return link
+    match = re.search(r"\b(?:location|where|at):?\s+([^\n.]{3,120})", text, flags=re.IGNORECASE)
+    if match:
+        location = match.group(1).strip()
+        return "" if looks_like_time(location) else compact_text(location, 200)
+    return ""
+
+
+def detect_appointment_fields(item: EmailItem) -> dict[str, str]:
+    text = visible_email_text(item)
+    lowered = text.lower()
+    appointment_words = (
+        "appointment",
+        "meeting",
+        "meet",
+        "check-in",
+        "check in",
+        "catch up",
+        "schedule",
+        "scheduled",
+        "invite",
+        "calendar",
+        "interview",
+        "webinar",
+    )
+    has_appointment_word = any(word in lowered for word in appointment_words)
+    date_value = parse_human_date(text)
+    time_value = parse_human_time(text)
+    link = extract_meeting_link(text)
+    if not has_appointment_word or not (date_value or time_value or link):
+        return {"date": "", "time": "", "location": "", "link": ""}
+    return {
+        "date": date_value,
+        "time": time_value,
+        "location": extract_email_location(text),
+        "link": link,
+    }
+
+
+def email_is_promotional(item: EmailItem) -> bool:
+    text = email_text(item)
+    promo_words = ("sale", "deal", "discount", "off", "coupon", "offer", "promo", "save", "limited time", "expires")
+    weak_words = ("unsubscribe", "newsletter", "digest", "sponsored")
+    return any(word in text for word in promo_words) and not all(word in text for word in weak_words)
+
+
+def promo_score(item: EmailItem) -> int:
+    text = email_text(item)
+    score = 0
+    strong_terms = ("50% off", "60% off", "70% off", "free shipping", "expires today", "last chance", "limited time")
+    useful_terms = ("discount", "coupon", "sale", "deal", "offer", "save")
+    spam_terms = ("crypto", "winner", "guaranteed", "act now", "risk-free")
+    score += sum(2 for term in strong_terms if term in text)
+    score += sum(1 for term in useful_terms if term in text)
+    score -= sum(2 for term in spam_terms if term in text)
+    if re.search(r"\b\d{2,3}%\s+off\b", text):
+        score += 2
+    return score
+
+
+def email_type(item: EmailItem, appointment: dict[str, str]) -> str:
+    text = email_text(item)
+    sender = item.sender.lower()
+    if any(appointment.values()):
+        return "appointment"
+    if any(word in text for word in ("security", "password", "sign-in", "login", "verification", "2fa", "account alert")):
+        return "security"
+    if any(word in text for word in ("deadline", "due today", "due tomorrow", "due by", "expires", "final notice")):
+        return "deadline"
+    if any(word in text for word in ("invoice", "bill", "statement", "balance due", "past due", "amount due")):
+        return "bill"
+    if any(word in text for word in ("payment", "receipt", "paid", "transaction", "charge", "refund")):
+        return "payment"
+    if email_is_promotional(item):
+        return "promo"
+    if sender and not any(word in sender for word in ("noreply", "no-reply", "donotreply", "newsletter")):
+        return "personal"
+    return "review"
+
+
+def email_is_urgent(item: EmailItem, item_type: str) -> bool:
+    text = email_text(item)
+    if item_type in {"appointment", "bill", "deadline", "security"}:
+        return True
+    return any(word in text for word in ("urgent", "asap", "action required", "due today", "due tomorrow", "past due"))
+
+
+def email_priority(item: EmailItem, item_type: str) -> str:
+    if email_is_urgent(item, item_type):
+        return "high"
+    if item_type in {"payment", "personal"}:
+        return "medium"
+    return "low"
+
+
+def email_emoji(item_type: str) -> str:
+    return {
+        "appointment": "📅",
+        "bill": "💸",
+        "payment": "💳",
+        "deadline": "🔥",
+        "security": "🔐",
+        "promo": "🎁",
+        "personal": "👤",
+        "review": "📩",
+    }.get(item_type, "📩")
+
+
+def email_why_it_matters(item: EmailItem, item_type: str) -> str:
+    if item_type == "appointment":
+        return "It may affect your calendar."
+    if item_type == "bill":
+        return "It appears to be a bill or amount due."
+    if item_type == "payment":
+        return "It appears payment-related."
+    if item_type == "deadline":
+        return "It may include a deadline or requested action."
+    if item_type == "security":
+        return "It may be account or security related."
+    if item_type == "promo":
+        return "It looks promotional."
+    if item_type == "personal":
+        return "It looks like a direct message from a person or organization."
+    return "It may be worth a quick review."
+
+
+def email_action(item: EmailItem, item_type: str) -> str:
+    if item_type == "appointment":
+        return "Add to calendar"
+    if item_type == "bill":
+        due_match = re.search(r"\b(?:by|before|due)\s+([A-Z][a-z]+day|today|tomorrow|[A-Z][a-z]+\s+\d{1,2})", visible_email_text(item), flags=re.IGNORECASE)
+        return f"Review bill due {compact_text(due_match.group(1), 40)}" if due_match else "Review bill"
+    if item_type == "payment":
+        return "Review payment"
+    if item_type == "deadline":
+        return "Handle deadline"
+    if item_type == "security":
+        return "Review security alert"
+    if item_type == "promo":
+        return "Review offer" if promo_score(item) >= 3 else "Ignore"
+    if item_type == "personal":
+        return "Reply / review"
+    return "Review / optional"
+
+
+def email_highlight(item: EmailItem, item_type: str) -> str:
+    text = re.sub(r"\s+", " ", (item.snippet or item.raw_body or "").strip())
+    subject = item.subject.strip()
+    sentence = re.split(r"(?<=[.!?])\s+", text or subject, maxsplit=1)[0]
+    prefix = {
+        "appointment": "Scheduling: ",
+        "bill": "Bill: ",
+        "payment": "Payment: ",
+        "deadline": "Deadline: ",
+        "security": "Security: ",
+        "promo": "Promo: ",
+    }.get(item_type, "")
+    return compact_text(prefix + sentence, 220) or "No preview text available."
+
+
+def digest_item_score(item: dict[str, Any]) -> int:
+    base = {
+        "appointment": 120,
+        "bill": 105,
+        "deadline": 100,
+        "security": 95,
+        "payment": 85,
+        "personal": 70,
+        "review": 45,
+        "promo": 20,
+    }.get(str(item.get("type", "review")), 45)
+    if item.get("priority") == "high":
+        base += 30
+    elif item.get("priority") == "medium":
+        base += 10
+    return base
+
+
+def build_digest_item(item: EmailItem) -> dict[str, Any]:
+    appointment = detect_appointment_fields(item)
+    item_type = email_type(item, appointment)
+    priority = email_priority(item, item_type)
+    digest_item = {
+        "id": f"{item.provider}:{item.account}:{item.message_id}",
+        "provider": item.provider,
+        "account": item.account,
+        "message_id": item.message_id,
+        "gmail_message_id": item.message_id if item.provider == "gmail" else "",
+        "thread_id": item.thread_id,
+        "type": item_type,
+        "category": item_type,
+        "priority": priority,
+        "emoji": email_emoji(item_type),
+        "subject": compact_text(item.subject or "(no subject)", 160),
+        "from": compact_text(item.sender or "Unknown", 160),
+        "from_display": sender_display(item.sender),
+        "received_at": item.received_at,
+        "unread": item.unread,
+        "highlight": email_highlight(item, item_type),
+        "why_it_matters": email_why_it_matters(item, item_type),
+        "action": email_action(item, item_type),
+        "date": appointment.get("date", ""),
+        "time": appointment.get("time", ""),
+        "location": appointment.get("location", ""),
+        "link": appointment.get("link", ""),
+    }
+    digest_item["_score"] = digest_item_score(digest_item)
+    return digest_item
+
+
+def load_mailman_messages(query: str) -> tuple[list[EmailItem], list[AccountError]]:
+    items: list[EmailItem] = []
+    errors: list[AccountError] = []
+
+    if GMAIL_ACCOUNTS:
+        for account in GMAIL_ACCOUNTS:
+            messages, error = fetch_gmail_messages(account, query=query)
+            items.extend(messages)
+            if error:
+                errors.append(AccountError(provider="gmail", account=account, message=error))
+    else:
+        token, error = gmail_access_token()
+        account = gmail_account_name()
+        if token:
+            messages, fetch_error = fetch_gmail_messages(account, query=query, token=token)
+            items.extend(messages)
+            if fetch_error:
+                errors.append(AccountError(provider="gmail", account=account, message=fetch_error))
+        else:
+            errors.append(AccountError(provider="gmail", account=account, message=f"Gmail is not configured: {error}"))
+
+    return items, errors
+
+
+def build_mailman_digest(unread_only: bool = True, query: str | None = None, limit: int | None = None) -> dict[str, Any]:
+    scan_query = query or (GMAIL_UNREAD_QUERY if unread_only else GMAIL_QUERY)
+    messages, account_errors = load_mailman_messages(scan_query)
+    digest_items = [build_digest_item(item) for item in messages]
+    digest_items.sort(key=lambda entry: (-int(entry.get("_score", 0)), str(entry.get("received_at", "")), str(entry.get("id", ""))))
+    for rank, entry in enumerate(digest_items, start=1):
+        entry["rank"] = rank
+        entry.pop("_score", None)
+    if limit is not None:
+        digest_items = digest_items[:limit]
+
+    summary = {
+        "total": len(digest_items),
+        "urgent": sum(1 for item in digest_items if item.get("priority") == "high"),
+        "appointments": sum(1 for item in digest_items if item.get("type") == "appointment"),
+        "bills": sum(1 for item in digest_items if item.get("type") == "bill"),
+        "payments": sum(1 for item in digest_items if item.get("type") == "payment"),
+        "deadlines": sum(1 for item in digest_items if item.get("type") == "deadline"),
+        "security": sum(1 for item in digest_items if item.get("type") == "security"),
+        "promos": sum(1 for item in digest_items if item.get("type") == "promo"),
+        "personal": sum(1 for item in digest_items if item.get("type") == "personal"),
+        "review": sum(1 for item in digest_items if item.get("type") == "review"),
+    }
+    return {
+        "agent": "mailman",
+        "generated_at": now_utc().replace(microsecond=0).isoformat(),
+        "query": scan_query,
+        "read_only": True,
+        "summary": summary,
+        "items": digest_items,
+        "errors": [asdict(error) for error in account_errors],
+    }
 
 
 def create_google_calendar_event(draft: EventDraft) -> str:
@@ -697,6 +1240,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    if "--test" in sys.argv:
+        digest = build_mailman_digest(unread_only=True)
+        print(json.dumps(digest, indent=2, ensure_ascii=False))
+        return
+
     if not BOT_TOKEN:
         raise RuntimeError("BUBBLES_BOT_TOKEN is not set.")
     if ALLOWED_USER_ID is None:
