@@ -1,0 +1,53 @@
+"""Simple intent router for local agents."""
+
+from .coding_agent import CodingAgent
+from .maintenance_agent import MaintenanceAgent
+from .system_agent import SystemAgent
+
+
+class AgentController:
+    def __init__(self) -> None:
+        self.system_agent = SystemAgent()
+        self.maintenance_agent = MaintenanceAgent()
+        self.coding_agent = CodingAgent()
+
+    def list_agents(self) -> list[dict]:
+        return [
+            {
+                "name": self.system_agent.name,
+                "description": self.system_agent.description,
+                "intents": ["system"],
+            },
+            {
+                "name": self.maintenance_agent.name,
+                "description": self.maintenance_agent.description,
+                "intents": ["maintenance"],
+            },
+            {
+                "name": self.coding_agent.name,
+                "description": self.coding_agent.description,
+                "intents": ["code"],
+            },
+        ]
+
+    def route(self, intent: str, message: str = "") -> dict:
+        normalized = intent.strip().lower()
+
+        if normalized == "system":
+            return self.system_agent.handle(message)
+        if normalized == "maintenance":
+            return self.maintenance_agent.handle(message)
+        if normalized == "code":
+            return self.coding_agent.handle(message)
+        if normalized == "chat":
+            return {
+                "agent": "controller",
+                "response": "Chat intent received. Local Ollama integration can be added later.",
+                "ollama_required": False,
+            }
+
+        return {
+            "agent": "controller",
+            "response": "Unknown intent. Use one of: system, maintenance, code, chat.",
+            "available_intents": ["system", "maintenance", "code", "chat"],
+        }
