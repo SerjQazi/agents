@@ -1,0 +1,653 @@
+{
+  "generated": "2026-04-30T22:52:06",
+  "server_path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base",
+  "resources_path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources",
+  "total_resources": 97,
+  "stack": {
+    "framework": "QBCore",
+    "inventory": "qb-inventory",
+    "target": "qb-target",
+    "menu": "qb-menu",
+    "input": "qb-input",
+    "database": "oxmysql",
+    "voice": "pma-voice",
+    "known_missing": [
+      "ox_lib",
+      "illenium-appearance"
+    ]
+  },
+  "key_resources": {
+    "qb-core": {
+      "present": true,
+      "status": "present"
+    },
+    "qb-inventory": {
+      "present": true,
+      "status": "present"
+    },
+    "qb-target": {
+      "present": true,
+      "status": "present"
+    },
+    "qb-menu": {
+      "present": true,
+      "status": "present"
+    },
+    "qb-input": {
+      "present": true,
+      "status": "present"
+    },
+    "oxmysql": {
+      "present": true,
+      "status": "present"
+    },
+    "ox_lib": {
+      "present": false,
+      "status": "missing"
+    },
+    "illenium-appearance": {
+      "present": false,
+      "status": "missing"
+    },
+    "pma-voice": {
+      "present": true,
+      "status": "present"
+    },
+    "qb-weapons": {
+      "present": true,
+      "status": "present"
+    },
+    "qb-smallresources": {
+      "present": true,
+      "status": "present"
+    },
+    "qb-multicharacter": {
+      "present": true,
+      "status": "present"
+    }
+  },
+  "resources": [
+    {
+      "name": "baseevents",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[system]/baseevents",
+      "folder": "[cfx-default]/[system]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "basic-gamemode",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[gamemodes]/basic-gamemode",
+      "folder": "[cfx-default]/[gamemodes]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "bob74_ipl",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[standalone]/bob74_ipl",
+      "folder": "[standalone]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "chat-theme-gtao",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[gameplay]/chat-theme-gtao",
+      "folder": "[cfx-default]/[gameplay]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "connectqueue",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[standalone]/connectqueue",
+      "folder": "[standalone]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "dealer_map",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[defaultmaps]/dealer_map",
+      "folder": "[defaultmaps]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "example-loadscreen",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[test]/example-loadscreen",
+      "folder": "[cfx-default]/[test]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "fivem",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[test]/fivem",
+      "folder": "[cfx-default]/[test]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "fivem-map-hipster",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[gamemodes]/[maps]/fivem-map-hipster",
+      "folder": "[cfx-default]/[gamemodes]/[maps]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "fivem-map-skater",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[gamemodes]/[maps]/fivem-map-skater",
+      "folder": "[cfx-default]/[gamemodes]/[maps]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "hardcap",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[system]/hardcap",
+      "folder": "[cfx-default]/[system]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "hospital_map",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[defaultmaps]/hospital_map",
+      "folder": "[defaultmaps]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "interact-sound",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[standalone]/interact-sound",
+      "folder": "[standalone]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "mapmanager",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[managers]/mapmanager",
+      "folder": "[cfx-default]/[managers]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "menuv",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[standalone]/menuv",
+      "folder": "[standalone]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "menuv_example",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[standalone]/menuv/menuv_example",
+      "folder": "[standalone]/menuv",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "money",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[gameplay]/[examples]/money",
+      "folder": "[cfx-default]/[gameplay]/[examples]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "money-fountain",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[gameplay]/[examples]/money-fountain",
+      "folder": "[cfx-default]/[gameplay]/[examples]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "money-fountain-example-map",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[gameplay]/[examples]/money-fountain-example-map",
+      "folder": "[cfx-default]/[gameplay]/[examples]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "oxmysql",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[standalone]/oxmysql",
+      "folder": "[standalone]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "ped-money-drops",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[gameplay]/[examples]/ped-money-drops",
+      "folder": "[cfx-default]/[gameplay]/[examples]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "player-data",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[gameplay]/player-data",
+      "folder": "[cfx-default]/[gameplay]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "playernames",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[gameplay]/playernames",
+      "folder": "[cfx-default]/[gameplay]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "pma-voice",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[voice]/pma-voice",
+      "folder": "[voice]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "PolyZone",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[standalone]/PolyZone",
+      "folder": "[standalone]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "prison_canteen",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[defaultmaps]/[prison_map]/prison_canteen",
+      "folder": "[defaultmaps]/[prison_map]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "prison_main",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[defaultmaps]/[prison_map]/prison_main",
+      "folder": "[defaultmaps]/[prison_map]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "prison_meeting",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[defaultmaps]/[prison_map]/prison_meeting",
+      "folder": "[defaultmaps]/[prison_map]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "progressbar",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[standalone]/progressbar",
+      "folder": "[standalone]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-adminmenu",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-adminmenu",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-ambulancejob",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-ambulancejob",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-apartments",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-apartments",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-banking",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-banking",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-bankrobbery",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-bankrobbery",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-busjob",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-busjob",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-cityhall",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-cityhall",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-clothing",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-clothing",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-core",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-core",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-crafting",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-crafting",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-crypto",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-crypto",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-diving",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-diving",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-doorlock",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-doorlock",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-drugs",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-drugs",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-fuel",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-fuel",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-garages",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-garages",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-garbagejob",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-garbagejob",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-hotdogjob",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-hotdogjob",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-houserobbery",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-houserobbery",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-houses",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-houses",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-hud",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-hud",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-input",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-input",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-interior",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-interior",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-inventory",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-inventory",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-jewelery",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-jewelery",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-lapraces",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-lapraces",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-loading",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-loading",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-management",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-management",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-mechanicjob",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-mechanicjob",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-menu",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-menu",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-minigames",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-minigames",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-multicharacter",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-multicharacter",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-newsjob",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-newsjob",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-pawnshop",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-pawnshop",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-phone",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-phone",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-policejob",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-policejob",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-prison",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-prison",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-radialmenu",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-radialmenu",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-radio",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[voice]/qb-radio",
+      "folder": "[voice]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-recyclejob",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-recyclejob",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-scoreboard",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-scoreboard",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-scrapyard",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-scrapyard",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-shops",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-shops",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-smallresources",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-smallresources",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-spawn",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-spawn",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-storerobbery",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-storerobbery",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-streetraces",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-streetraces",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-target",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-target",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-taxijob",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-taxijob",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-towjob",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-towjob",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-truckrobbery",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-truckrobbery",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-vehiclekeys",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-vehiclekeys",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-vehiclesales",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-vehiclesales",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-vehicleshop",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-vehicleshop",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-vineyard",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-vineyard",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-weapons",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-weapons",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-weathersync",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-weathersync",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "qb-weed",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[qb]/qb-weed",
+      "folder": "[qb]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "rconlog",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[system]/rconlog",
+      "folder": "[cfx-default]/[system]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "redm-map-one",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[gamemodes]/[maps]/redm-map-one",
+      "folder": "[cfx-default]/[gamemodes]/[maps]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "runcode",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[system]/runcode",
+      "folder": "[cfx-default]/[system]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "safecracker",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[standalone]/safecracker",
+      "folder": "[standalone]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "screenshot-basic",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[standalone]/screenshot-basic",
+      "folder": "[standalone]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "sessionmanager",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[system]/sessionmanager",
+      "folder": "[cfx-default]/[system]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "sessionmanager-rdr3",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[system]/sessionmanager-rdr3",
+      "folder": "[cfx-default]/[system]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "spawnmanager",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[managers]/spawnmanager",
+      "folder": "[cfx-default]/[managers]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "webpack",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[system]/[builders]/webpack",
+      "folder": "[cfx-default]/[system]/[builders]",
+      "manifest": "fxmanifest.lua"
+    },
+    {
+      "name": "yarn",
+      "path": "/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources/[cfx-default]/[system]/[builders]/yarn",
+      "folder": "[cfx-default]/[system]/[builders]",
+      "manifest": "fxmanifest.lua"
+    }
+  ]
+}
