@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -293,6 +294,52 @@ def render_suggested_code_fixes(assumptions: dict[str, list[str]], resources: se
     return lines
 
 
+def render_patch_plan(script_path: Path, server_path: Path, scan: dict, resources: set[str]) -> str:
+    assumptions = scan["assumptions"]
+    risks = compare_assumptions(assumptions, resources)
+    plan = adaptation_plan(assumptions, resources, risks)
+
+    lines = [
+        "# FiveM Patch Plan",
+        "",
+        f"Generated: {datetime.now().isoformat(timespec='seconds')}",
+        f"Staged script: `{script_path}`",
+        f"Server: `{server_path}`",
+        "",
+        "## Summary of Detected Issues",
+        "",
+        f"- Manifest present at script root: {'yes' if scan['has_manifest'] else 'no'}",
+        f"- Files scanned: {len(scan['files'])}",
+    ]
+
+    for category, values in assumptions.items():
+        lines.append(f"- {category}: {', '.join(values) if values else 'not detected'}")
+
+    lines.extend(["", "## Risk Flags"])
+    if risks:
+        lines.extend(f"- {risk}" for risk in risks)
+    else:
+        lines.append("- No obvious high-risk compatibility issues detected.")
+
+    lines.extend(["", "## Adaptation Plan"])
+    lines.extend(f"{index}. {item}" for index, item in enumerate(plan, start=1))
+    lines.extend(render_suggested_code_fixes(assumptions, resources))
+
+    lines.extend(
+        [
+            "",
+            "## Read-Only Guardrails",
+            "",
+            "- This plan is not a patch and does not overwrite full files.",
+            "- Apply changes only inside the staged script after review.",
+            "- Do not modify live FiveM resources.",
+            "- Do not edit qb-core directly.",
+        ]
+    )
+
+    return "\n".join(lines) + "\n"
+
+
 def render_report(
     script_path: Path,
     server_path: Path,
@@ -361,12 +408,122 @@ def render_report(
     return "\n".join(lines) + "\n"
 
 
+def ensure_qbcore_init(text: str) -> tuple[str, bool]:
+    if "GetCoreObject" in text or "local QBCore" in text:
+        return text, False
+
+    init_block = (
+        "-- AGENT FIX START: initialize QBCore for staged compatibility work\n"
+        "local QBCore = exports['qb-core']:GetCoreObject()\n"
+        "-- AGENT FIX END\n\n"
+    )
+    return init_block + text, True
+
+
+def replace_esx_references(text: str) -> tuple[str, bool]:
+    updated = text
+    changed = False
+
+    patterns = [
+        (r"local\s+ESX\s*=\s*exports\[['\"]es_extended['\"]\]:getSharedObject\(\)\s*\n?", ""),
+        (r"ESX\.GetPlayerFromId\(([^)]+)\)", r"QBCore.Functions.GetPlayer(\1)"),
+        (r"\bplayer\.identifier\b", "Player.PlayerData.citizenid"),
+        (r"\bplayer\b", "Player"),
+        (r"ESX\.ShowNotification\(([^)]+)\)", r"QBCore.Functions.Notify(\1)"),
+    ]
+
+    for pattern, replacement in patterns:
+        updated_next = re.sub(pattern, replacement, updated)
+        if updated_next != updated:
+            updated = updated_next
+            changed = True
+
+    if changed and "AGENT FIX START: replace obvious ESX references with QBCore equivalents" not in updated:
+        updated = (
+            "-- AGENT FIX START: replace obvious ESX references with QBCore equivalents\n"
+            "-- Review each QBCore player and notification call before moving this staged resource.\n"
+            "-- AGENT FIX END\n"
+            + updated
+        )
+
+    return updated, changed
+
+
+def replace_mysql_async(text: str) -> tuple[str, bool]:
+    pattern = re.compile(
+        r"MySQL\.Async\.fetchAll\(\s*"
+        r"(?P<query>'[^']*'|\"[^\"]*\")\s*,\s*"
+        r"(?P<params>\{.*?\})\s*,\s*"
+        r"function\((?P<result>\w+)\)\s*"
+        r"(?P<body>.*?)"
+        r"\s*end\s*"
+        r"\)",
+        re.DOTALL,
+    )
+
+    def replacement(match: re.Match) -> str:
+        query = match.group("query")
+        params = match.group("params")
+        result = match.group("result")
+        body = match.group("body").strip()
+        return (
+            "-- AGENT FIX START: convert basic mysql-async fetchAll to oxmysql await query\n"
+            f"local {result} = MySQL.query.await(\n"
+            f"        {query},\n"
+            f"        {params}\n"
+            "    )\n"
+            f"    {body}\n"
+            "-- AGENT FIX END"
+        )
+
+    updated, count = pattern.subn(replacement, text)
+    return updated, count > 0
+
+
+def apply_staged_fixes(script_path: Path) -> list[str]:
+    plan_file = script_path / "patch-plan.md"
+    if not plan_file.is_file():
+        raise SystemExit(f"patch-plan.md not found: {plan_file}")
+
+    changed_files = []
+    for file_path in sorted(script_path.rglob("*.lua")):
+        if not file_path.is_file():
+            continue
+
+        original = read_text(file_path)
+        if "AGENT FIX START" in original:
+            continue
+
+        updated = original
+        file_changed = False
+
+        needs_qbcore = "ESX" in updated or "ox_inventory" in updated
+        if needs_qbcore:
+            updated, changed = ensure_qbcore_init(updated)
+            file_changed = file_changed or changed
+
+        updated, changed = replace_esx_references(updated)
+        file_changed = file_changed or changed
+
+        updated, changed = replace_mysql_async(updated)
+        file_changed = file_changed or changed
+
+        if file_changed and updated != original:
+            file_path.write_text(updated, encoding="utf-8")
+            changed_files.append(str(file_path.relative_to(script_path)))
+
+    return changed_files
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="FiveM incoming script compatibility scanner")
     parser.add_argument("--script", required=True, help="Incoming script folder")
     parser.add_argument("--server", default=str(DEFAULT_SERVER), help="FiveM server base folder")
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="Reports folder")
     parser.add_argument("--suggest", action="store_true", help="Add read-only suggested code fixes to the report")
+    parser.add_argument("--plan-out", help="Write a read-only patch plan to this markdown file")
+    parser.add_argument("--no-report", action="store_true", help="Skip writing the standard integration report")
+    parser.add_argument("--apply-staged", action="store_true", help="Apply safe fixes only inside the staged script folder")
     args = parser.parse_args()
 
     script_path = Path(args.script).expanduser().resolve()
@@ -378,9 +535,29 @@ def main() -> int:
     if not server_path.is_dir():
         raise SystemExit(f"Server folder not found: {server_path}")
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.apply_staged:
+        changed_files = apply_staged_fixes(script_path)
+        if changed_files:
+            print("Changed staged files:")
+            for file_name in changed_files:
+                print(f"- {file_name}")
+        else:
+            print("No staged file changes applied.")
+        return 0
+
     scan = scan_script(script_path)
     resources = scan_server_resources(server_path)
+
+    if args.plan_out:
+        plan_file = Path(args.plan_out).expanduser().resolve()
+        plan_file.parent.mkdir(parents=True, exist_ok=True)
+        plan_file.write_text(render_patch_plan(script_path, server_path, scan, resources), encoding="utf-8")
+        print(f"Patch plan created: {plan_file}")
+
+    if args.no_report:
+        return 0
+
+    out_dir.mkdir(parents=True, exist_ok=True)
     report = render_report(script_path, server_path, scan, resources, include_suggestions=args.suggest)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")

@@ -5,6 +5,8 @@ AGENT_REPO="/home/agentzero/agents"
 SERVER_BASE="/home/agentzero/fivem-server/txData/QBCore_F16AC8.base"
 SERVER_RESOURCES="$SERVER_BASE/resources"
 REPORTS_DIR="$AGENT_REPO/reports"
+STAGING_DIR="$AGENT_REPO/staging"
+BACKUPS_DIR="$AGENT_REPO/backups"
 
 usage() {
   cat <<'USAGE'
@@ -12,6 +14,8 @@ Usage:
   fivem-agent profile
   fivem-agent scan SCRIPT_FOLDER
   fivem-agent suggest SCRIPT_FOLDER
+  fivem-agent prepare SCRIPT_FOLDER
+  fivem-agent apply SCRIPT_NAME
   fivem-agent status
 USAGE
 }
@@ -51,6 +55,130 @@ case "$command" in
       --server "$SERVER_BASE" \
       --out "$REPORTS_DIR" \
       --suggest
+    ;;
+
+  prepare)
+    shift
+    if [[ $# -ne 1 ]]; then
+      usage >&2
+      exit 2
+    fi
+
+    script_path="$(realpath "$1")"
+    if [[ ! -d "$script_path" ]]; then
+      echo "Script folder not found: $script_path" >&2
+      exit 1
+    fi
+
+    script_name="$(basename "$script_path")"
+    timestamp="$(date +%Y%m%d-%H%M%S)"
+    staging_path="$STAGING_DIR/$script_name"
+    backup_path="$BACKUPS_DIR/${script_name}_$timestamp"
+
+    if [[ -e "$staging_path" ]]; then
+      echo "Staging folder already exists: $staging_path" >&2
+      echo "Move or remove it before preparing this script again." >&2
+      exit 1
+    fi
+
+    mkdir -p "$STAGING_DIR" "$BACKUPS_DIR"
+    cp -a "$script_path" "$staging_path"
+    cp -a "$script_path" "$backup_path"
+
+    python3 "$AGENT_REPO/agent_core/fivem_integrator.py" \
+      --script "$script_path" \
+      --server "$SERVER_BASE" \
+      --out "$REPORTS_DIR"
+
+    python3 "$AGENT_REPO/agent_core/fivem_integrator.py" \
+      --script "$script_path" \
+      --server "$SERVER_BASE" \
+      --out "$REPORTS_DIR" \
+      --suggest
+
+    python3 "$AGENT_REPO/agent_core/fivem_integrator.py" \
+      --script "$staging_path" \
+      --server "$SERVER_BASE" \
+      --out "$REPORTS_DIR" \
+      --suggest \
+      --plan-out "$staging_path/patch-plan.md" \
+      --no-report
+
+    echo "Staging folder: $staging_path"
+    echo "Backup folder: $backup_path"
+    echo "Patch plan: $staging_path/patch-plan.md"
+    ;;
+
+  apply)
+    shift
+    if [[ $# -ne 1 ]]; then
+      usage >&2
+      exit 2
+    fi
+
+    script_name="$1"
+    if [[ "$script_name" == */* ]]; then
+      echo "Use a script name, not a path: $script_name" >&2
+      exit 2
+    fi
+
+    staging_path="$STAGING_DIR/$script_name"
+    patch_plan="$staging_path/patch-plan.md"
+    server_target="$SERVER_RESOURCES/$script_name"
+
+    if [[ ! -d "$staging_path" ]]; then
+      echo "Staging folder not found: $staging_path" >&2
+      exit 1
+    fi
+    if [[ ! -f "$patch_plan" ]]; then
+      echo "patch-plan.md not found: $patch_plan" >&2
+      exit 1
+    fi
+
+    snapshot_dir="$(mktemp -d /tmp/fivem-agent-apply.XXXXXX)"
+    cleanup() {
+      rm -rf "$snapshot_dir"
+    }
+    trap cleanup EXIT
+    before_path="$snapshot_dir/$script_name"
+    cp -a "$staging_path" "$before_path"
+
+    python3 "$AGENT_REPO/agent_core/fivem_integrator.py" \
+      --script "$staging_path" \
+      --server "$SERVER_BASE" \
+      --out "$REPORTS_DIR" \
+      --apply-staged
+
+    echo
+    echo "Planned changes:"
+    if [[ -d "$staging_path/.git" ]]; then
+      git -C "$staging_path" diff
+    else
+      diff -ru "$before_path" "$staging_path" || true
+    fi
+
+    echo
+    read -r -p "Apply to server resources? (yes/no) " confirm
+    if [[ "$confirm" != "yes" ]]; then
+      echo "Not applied to server resources."
+      exit 0
+    fi
+
+    if [[ -e "$server_target" ]]; then
+      echo "Warning: server resource already exists: $server_target"
+      read -r -p "Overwrite files in existing server resource? (yes/no) " overwrite_confirm
+      if [[ "$overwrite_confirm" != "yes" ]]; then
+        echo "Not applied to server resources."
+        exit 0
+      fi
+      cp -a "$staging_path/." "$server_target/"
+    else
+      cp -a "$staging_path" "$server_target"
+    fi
+
+    "$AGENT_REPO/scripts/push-to-server.sh"
+    echo
+    echo "Applied staged script to server resources: $server_target"
     ;;
 
   status)
