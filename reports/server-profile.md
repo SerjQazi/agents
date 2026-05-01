@@ -1,6 +1,6 @@
 # FiveM Server Profile
 
-Generated: 2026-04-30T22:52:06
+Generated: 2026-05-01T00:12:44
 Server: `/home/agentzero/fivem-server/txData/QBCore_F16AC8.base`
 Resources: `/home/agentzero/fivem-server/txData/QBCore_F16AC8.base/resources`
 Total resources: 97

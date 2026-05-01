@@ -176,7 +176,130 @@ def adaptation_plan(assumptions: dict[str, list[str]], resources: set[str], risk
     return plan
 
 
-def render_report(script_path: Path, server_path: Path, scan: dict, resources: set[str]) -> str:
+def suggested_code_fixes(assumptions: dict[str, list[str]], resources: set[str]) -> list[dict[str, str]]:
+    fixes = [
+        {
+            "title": "ESX to QBCore framework access",
+            "reason": "replace ESX player lookup with QBCore player lookup inside the incoming script",
+            "applies": "ESX" in assumptions["framework"] and "qb-core" in resources,
+            "body": """local QBCore = exports['qb-core']:GetCoreObject()
+
+RegisterNetEvent('example:server:action', function()
+    local src = source
+    local Player = QBCore.Functions.GetPlayer(src)
+
+    if not Player then
+        return
+    end
+
+    local citizenid = Player.PlayerData.citizenid
+    -- Continue using citizenid or Player.Functions APIs in this resource.
+end)""",
+        },
+        {
+            "title": "ox_inventory to qb-inventory item check and remove",
+            "reason": "replace ox_inventory item count and removal with QBCore player item APIs",
+            "applies": "ox_inventory" in assumptions["inventory"] and "qb-inventory" in resources,
+            "body": """local QBCore = exports['qb-core']:GetCoreObject()
+
+RegisterNetEvent('example:server:takeItem', function()
+    local src = source
+    local Player = QBCore.Functions.GetPlayer(src)
+
+    if not Player then
+        return
+    end
+
+    local item = Player.Functions.GetItemByName('lockpick')
+    if item and item.amount > 0 then
+        Player.Functions.RemoveItem('lockpick', 1)
+        TriggerClientEvent('inventory:client:ItemBox', src, QBCore.Shared.Items['lockpick'], 'remove')
+    end
+end)""",
+        },
+        {
+            "title": "ox_target to qb-target box zone",
+            "reason": "replace ox_target zone registration with qb-target AddBoxZone",
+            "applies": "ox_target" in assumptions["target"] and "qb-target" in resources,
+            "body": """CreateThread(function()
+    exports['qb-target']:AddBoxZone(
+        'test_bad_script_open',
+        vector3(0.0, 0.0, 72.0),
+        1.5,
+        1.5,
+        {
+            name = 'test_bad_script_open',
+            heading = 0.0,
+            minZ = 71.0,
+            maxZ = 73.0,
+        },
+        {
+            options = {
+                {
+                    icon = 'fa-solid fa-box',
+                    label = 'Open stash',
+                    action = function()
+                        TriggerEvent('test-bad-script:client:openStash')
+                    end,
+                },
+            },
+            distance = 2.0,
+        }
+    )
+end)""",
+        },
+        {
+            "title": "mysql-async to oxmysql query",
+            "reason": "replace mysql-async callback query with oxmysql await query",
+            "applies": "mysql-async" in assumptions["database"] and "oxmysql" in resources,
+            "body": """local rows = MySQL.query.await(
+    'SELECT * FROM players WHERE citizenid = ?',
+    { citizenid }
+)
+
+print(('oxmysql result count: %s'):format(#rows))""",
+        },
+    ]
+
+    return fixes
+
+
+def render_suggested_code_fixes(assumptions: dict[str, list[str]], resources: set[str]) -> list[str]:
+    lines = [
+        "",
+        "## Suggested Code Fixes",
+        "",
+        "These are read-only examples for the incoming script. They are not patches, do not overwrite full files, and must not be applied to qb-core or live server resources.",
+    ]
+
+    for fix in suggested_code_fixes(assumptions, resources):
+        status = "likely relevant" if fix["applies"] else "example only; matching dependency was not detected with the current server profile"
+        lines.extend(
+            [
+                "",
+                f"### {fix['title']}",
+                "",
+                f"- Status: {status}",
+                "- Apply only inside the incoming script after review and backup.",
+                "",
+                "```lua",
+                f"-- AGENT FIX START: {fix['reason']}",
+                fix["body"],
+                "-- AGENT FIX END",
+                "```",
+            ]
+        )
+
+    return lines
+
+
+def render_report(
+    script_path: Path,
+    server_path: Path,
+    scan: dict,
+    resources: set[str],
+    include_suggestions: bool = False,
+) -> str:
     assumptions = scan["assumptions"]
     risks = compare_assumptions(assumptions, resources)
     plan = adaptation_plan(assumptions, resources, risks)
@@ -220,6 +343,9 @@ def render_report(script_path: Path, server_path: Path, scan: dict, resources: s
     lines.extend(["", "## Adaptation Plan"])
     lines.extend(f"{index}. {item}" for index, item in enumerate(plan, start=1))
 
+    if include_suggestions:
+        lines.extend(render_suggested_code_fixes(assumptions, resources))
+
     lines.extend(["", "## Safety Gates", ""])
     lines.append("- Stop and ask before database schema changes.")
     lines.append("- Stop and ask before inventory core changes.")
@@ -240,6 +366,7 @@ def main() -> int:
     parser.add_argument("--script", required=True, help="Incoming script folder")
     parser.add_argument("--server", default=str(DEFAULT_SERVER), help="FiveM server base folder")
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="Reports folder")
+    parser.add_argument("--suggest", action="store_true", help="Add read-only suggested code fixes to the report")
     args = parser.parse_args()
 
     script_path = Path(args.script).expanduser().resolve()
@@ -254,7 +381,7 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     scan = scan_script(script_path)
     resources = scan_server_resources(server_path)
-    report = render_report(script_path, server_path, scan, resources)
+    report = render_report(script_path, server_path, scan, resources, include_suggestions=args.suggest)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     report_file = out_dir / f"integration-report-{script_path.name}-{timestamp}.md"

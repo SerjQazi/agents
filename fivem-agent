@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+AGENT_REPO="/home/agentzero/agents"
+SERVER_BASE="/home/agentzero/fivem-server/txData/QBCore_F16AC8.base"
+SERVER_RESOURCES="$SERVER_BASE/resources"
+REPORTS_DIR="$AGENT_REPO/reports"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  fivem-agent profile
+  fivem-agent scan SCRIPT_FOLDER
+  fivem-agent suggest SCRIPT_FOLDER
+  fivem-agent status
+USAGE
+}
+
+command="${1:-}"
+
+case "$command" in
+  profile)
+    shift
+    if [[ $# -ne 0 ]]; then
+      usage >&2
+      exit 2
+    fi
+    exec python3 "$AGENT_REPO/agent_core/server_profiler.py"
+    ;;
+
+  scan)
+    shift
+    if [[ $# -ne 1 ]]; then
+      usage >&2
+      exit 2
+    fi
+    exec python3 "$AGENT_REPO/agent_core/fivem_integrator.py" \
+      --script "$1" \
+      --server "$SERVER_BASE" \
+      --out "$REPORTS_DIR"
+    ;;
+
+  suggest)
+    shift
+    if [[ $# -ne 1 ]]; then
+      usage >&2
+      exit 2
+    fi
+    exec python3 "$AGENT_REPO/agent_core/fivem_integrator.py" \
+      --script "$1" \
+      --server "$SERVER_BASE" \
+      --out "$REPORTS_DIR" \
+      --suggest
+    ;;
+
+  status)
+    shift
+    if [[ $# -ne 0 ]]; then
+      usage >&2
+      exit 2
+    fi
+    echo "Agent repo: $AGENT_REPO"
+    git -C "$AGENT_REPO" status
+    echo
+    echo "FiveM resources repo: $SERVER_RESOURCES"
+    git -C "$SERVER_RESOURCES" status
+    ;;
+
+  -h|--help|help)
+    usage
+    ;;
+
+  "")
+    usage >&2
+    exit 2
+    ;;
+
+  *)
+    echo "Unknown command: $command" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
