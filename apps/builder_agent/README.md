@@ -11,7 +11,7 @@ run SQL, does not restart FiveM, and does not push Git.
 ```bash
 cd /home/agentzero/agents
 source .venv/bin/activate
-uvicorn builder_agent.app:app --host 127.0.0.1 --port 8010
+uvicorn apps.builder_agent.app:app --host 127.0.0.1 --port 8010
 ```
 
 Open:
@@ -33,4 +33,3 @@ curl -X POST http://127.0.0.1:8010/tasks \
 - Reports: `/home/agentzero/agents/reports/builder-agent/`
 - Logs: `/home/agentzero/agents/logs/builder-agent/`
 - Memory: `/home/agentzero/agents/memory/builder-agent-memory.sqlite`
-

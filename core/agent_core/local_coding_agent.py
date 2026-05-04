@@ -37,7 +37,7 @@ class LocalCodingAgent:
         "id_ed25519.pub",
     }
     ignored_patterns = ("*.key", ".env.*", "ssh-ed25519 *")
-    important_root_files = ("api.py", "README.md", "requirements.txt")
+    important_root_files = ("api.py", "agentos_app.py", "README.md", "requirements.txt")
     max_tree_entries = 300
     max_file_chars = 12000
     max_total_context_chars = 60000
@@ -161,7 +161,7 @@ class LocalCodingAgent:
             if path.is_file() and not self._is_ignored(path):
                 paths.append(path)
 
-        agent_core = self.repo_root / "agent_core"
+        agent_core = self.repo_root / "core" / "agent_core"
         if agent_core.is_dir():
             for path in sorted(agent_core.glob("*.py")):
                 if path.is_file() and not self._is_ignored(path):

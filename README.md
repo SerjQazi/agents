@@ -2,9 +2,24 @@
 
 Local agent prototypes and a clean FastAPI backend for an Ubuntu server.
 
-The older prototype files `bubbles.py` and `mailman.py` are still present and
-unchanged. The new backend lives in `agent_core/` with `api.py` as the FastAPI
-entrypoint.
+The main AgentOS Dashboard lives in `apps/agentos_agent/`. Compatibility
+entrypoints remain at the repo root for existing commands and services.
+
+## Layout
+
+```text
+apps/       Dashboard applications: AgentOS, Builder Agent, Coding Agent
+bots/       Assistant and notification bots
+cli/        Shell command implementations
+core/       Shared AgentOS core modules
+scripts/    Git and maintenance scripts
+reports/    Generated reports
+logs/       Runtime logs
+memory/     Local agent memory stores
+incoming/   Incoming FiveM scripts for review
+staging/    Staged plans and previews
+backups/    Safety backups
+```
 
 ## Install
 
@@ -17,7 +32,7 @@ pip install -r requirements.txt
 ## Run the backend
 
 ```bash
-uvicorn api:app --host 0.0.0.0 --port 8000
+uvicorn apps.agentos_agent.app:app --host 0.0.0.0 --port 8000
 ```
 
 Then open:

@@ -1,0 +1,1 @@
+"""FiveM Agent CLI package."""

@@ -10,10 +10,10 @@ from typing import Any
 
 
 KNOWN_AGENTS = [
-    {"name": "AgentOS dashboard/api", "service": "agentos.service", "keywords": ["uvicorn api:app"]},
-    {"name": "Builder Agent", "service": "builder-agent.service", "keywords": ["builder_agent.app:app"]},
-    {"name": "Bubbles bot", "service": "bubbles.service", "keywords": ["bubbles.py", "bubbles"]},
-    {"name": "mailman / mail agent", "service": "mailman.service", "keywords": ["mailman.py", "mail-agent", "mailman"]},
+    {"name": "AgentOS Dashboard", "service": "agentos.service", "keywords": ["agentos_agent.app:app", "uvicorn api:app"]},
+    {"name": "Builder Agent", "service": "builder-agent.service", "keywords": ["apps.builder_agent.app:app", "builder_agent.app:app"]},
+    {"name": "Bubbles bot", "service": "bubbles.service", "keywords": ["bots.bubbles_agent", "bubbles.py", "bubbles"]},
+    {"name": "mailman / mail agent", "service": "mailman.service", "keywords": ["bots.mail_agent", "mailman.py", "mail-agent", "mailman"]},
     {"name": "system_agent", "service": "system-agent.service", "keywords": ["system_agent"]},
     {"name": "maintenance_agent", "service": "maintenance-agent.service", "keywords": ["maintenance_agent"]},
     {"name": "coding_agent", "service": "coding-agent.service", "keywords": ["coding_agent"], "health_url": "http://127.0.0.1:8020/health"},
