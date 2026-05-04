@@ -1,13 +1,18 @@
 """FastAPI backend for the local multi-agent dashboard."""
 
 import html
+import json
 import re
+import shutil
 import socket
 import subprocess
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -15,6 +20,7 @@ from core.agent_core.config import settings
 from core.agent_core.controller import AgentController
 from core.agent_core.self_healing_agent import SelfHealingAgent
 from core.agent_core.system_watcher import SystemWatcher
+from apps.shared_layout import layout_css, render_layout
 
 
 app = FastAPI(title=settings.app_name)
@@ -256,13 +262,13 @@ AGENT_REGISTRY = [
         "icon": "🧭",
     },
     {
-        "display_name": "Builder Agent",
+        "display_name": "Planner Agent",
         "group": "Dashboards / Control",
         "order": 20,
         "type": "dashboard",
         "service_name": "builder-agent",
         "process_keywords": ["apps.builder_agent.app:app", "uvicorn builder_agent.app:app"],
-        "url": "http://100.68.10.125:8010",
+        "url": "/planner",
         "path": "/home/agentzero/agents/apps/builder_agent",
         "description": "Plan-only FiveM script analysis, staging previews, validation, and compatibility reports.",
         "icon": "🛠️",
@@ -274,7 +280,7 @@ AGENT_REGISTRY = [
         "type": "dashboard",
         "service_name": "coding-agent",
         "process_keywords": ["apps.coding_agent.app:app", "uvicorn coding_agent.app:app"],
-        "url": "http://127.0.0.1:8020",
+        "url": "/coding",
         "path": "/home/agentzero/agents/apps/coding_agent",
         "description": "Local coding planning and repo-context helper.",
         "icon": "💻",
@@ -522,11 +528,9 @@ def render_agent_links_section() -> str:
         target = str(agent.get("url") or "/agents")
         clickable = bool(agent.get("url"))
         tag = "a" if clickable else "div"
-        attrs = (
-            f'class="agent-link" href="{esc(target)}" target="_blank" rel="noopener noreferrer"'
-            if clickable
-            else 'class="agent-link static"'
-        )
+        external = target.startswith("http://") or target.startswith("https://")
+        target_attrs = ' target="_blank" rel="noopener noreferrer"' if external else ""
+        attrs = f'class="agent-link" href="{esc(target)}"{target_attrs}' if clickable else 'class="agent-link static"'
         link_html = (
             '<{tag} {attrs}>'
             '<span class="agent-link-icon" aria-hidden="true">{icon}</span>'
@@ -643,9 +647,9 @@ OPS_COMMAND_GROUPS = [
                 "tags": ["logs", "services"],
             },
             {
-                "title": "Builder Agent journal",
-                "description": "Follow recent Builder Agent service logs.",
-                "command": "journalctl -u builder-agent.service -n 100 -f",
+                "title": "Planner Agent journal",
+                "description": "Follow recent Planner Agent service logs.",
+                "command": "journalctl -u planner-agent.service -n 100 -f",
                 "tags": ["logs", "agents", "services"],
             },
             {
@@ -655,9 +659,9 @@ OPS_COMMAND_GROUPS = [
                 "tags": ["health", "agents"],
             },
             {
-                "title": "Builder Agent health",
-                "description": "Check whether the local Builder Agent API responds.",
-                "command": "curl http://127.0.0.1:8010/health",
+                "title": "Planner page through AgentOS",
+                "description": "Check whether the Planner page renders through AgentOS navigation.",
+                "command": "curl http://100.68.10.125:8080/planner",
                 "tags": ["health", "agents"],
             },
             {
@@ -686,9 +690,9 @@ OPS_COMMAND_GROUPS = [
                 "note": "Use a different port if the service is already running.",
             },
             {
-                "title": "Run Builder Agent manually",
-                "description": "Start the Builder Agent dashboard/API on localhost.",
-                "command": "cd /home/agentzero/agents\nuvicorn apps.builder_agent.app:app --host 127.0.0.1 --port 8010",
+                "title": "Run Planner Agent manually",
+                "description": "Start the Planner Agent dashboard/API on localhost.",
+                "command": "cd /home/agentzero/agents\nuvicorn apps.planner_agent.app:app --host 127.0.0.1 --port 8010",
                 "tags": ["agents", "services"],
                 "note": "Do not run this over the active service unless you intend to debug a separate local process.",
             },
@@ -740,7 +744,7 @@ OPS_COMMAND_GROUPS = [
     },
     {
         "title": "Agents",
-        "description": "AgentOS, Builder Agent, and local planning endpoints.",
+        "description": "AgentOS, Planner Agent, and local planning endpoints.",
         "commands": [
             {
                 "title": "Command Center health",
@@ -755,11 +759,11 @@ OPS_COMMAND_GROUPS = [
                 "tags": ["agents"],
             },
             {
-                "title": "Builder task example",
-                "description": "Create a plan-only Builder Agent task for an incoming script.",
-                "command": "curl -X POST http://127.0.0.1:8010/tasks \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"prompt\":\"Scan incoming script and tell me dependencies.\",\"script_path\":\"incoming/qb-inventory-new\"}'",
+                "title": "Planner task example",
+                "description": "Create a plan-only Planner task through AgentOS for an incoming script.",
+                "command": "Open http://100.68.10.125:8080/planner and use the New Task form with script_path incoming/qb-inventory-new",
                 "tags": ["agents", "fivem"],
-                "note": "Builder Agent planning does not modify live FiveM resources.",
+                "note": "Planner Agent planning does not modify live FiveM resources.",
             },
         ],
     },
@@ -1031,6 +1035,8 @@ def dashboard() -> str:
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>AgentOS Dashboard</title>
         <style>
+          """ + layout_css() + """
+          """ + layout_css() + """
           :root {
             color-scheme: dark;
             --bg: #050914;
@@ -1072,7 +1078,7 @@ def dashboard() -> str:
 
           .app-shell {
             display: grid;
-            grid-template-columns: 260px minmax(0, 1fr);
+            grid-template-columns: var(--ao-sidebar-width, 292px) minmax(0, 1fr);
             min-height: 100vh;
           }
 
@@ -2209,19 +2215,7 @@ def dashboard() -> str:
       </head>
       <body>
         <div class="app-shell">
-          <aside class="sidebar" aria-label="Primary navigation">
-            <div class="brand"><span class="brand-mark">AO</span><span>AgentOS</span></div>
-            <nav class="side-nav">
-              <a class="nav-item active" href="/"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7"></path><path d="M6 10v10h12V10"></path></svg><span>Dashboard</span></a>
-              <a class="nav-item" href="/control"><svg viewBox="0 0 24 24"><path d="M12 3l7 4v6c0 4-3 7-7 8-4-1-7-4-7-8V7l7-4z"></path></svg><span>Control Panels</span></a>
-              <a class="nav-item" href="/commands"><svg viewBox="0 0 24 24"><path d="M4 7h16M7 7v10M17 7v10M4 17h16"></path></svg><span>Commands</span></a>
-              <a class="nav-item" href="/ops"><svg viewBox="0 0 24 24"><path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path></svg><span>Ops Cheat Sheet</span></a>
-              <a class="nav-item" href="/agents"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg><span>Agents</span></a>
-              <a class="nav-item" href="/logs"><svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"></path><path d="M8 9h8M8 13h8M8 17h5"></path></svg><span>Logs</span></a>
-              <a class="nav-item" href="/settings"><svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"></path><path d="M4 12h2M18 12h2M12 4v2M12 18v2"></path></svg><span>Settings</span></a>
-            </nav>
-            """ + render_agent_links_section() + """
-          </aside>
+          """ + app_sidebar("dashboard") + """
           <main class="shell main-panel">
           <header class="hero glass">
             <div>
@@ -2648,6 +2642,7 @@ def control_panel() -> str:
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>AgentOS Control Panel</title>
         <style>
+          """ + layout_css() + """
           :root {
             color-scheme: dark;
             --bg: #050914;
@@ -2689,7 +2684,7 @@ def control_panel() -> str:
 
           .app-shell {
             display: grid;
-            grid-template-columns: 260px minmax(0, 1fr);
+            grid-template-columns: var(--ao-sidebar-width, 292px) minmax(0, 1fr);
             min-height: 100vh;
           }
 
@@ -3793,19 +3788,7 @@ def control_panel() -> str:
       </head>
       <body>
         <div class="app-shell">
-          <aside class="sidebar" aria-label="Primary navigation">
-            <div class="brand"><span class="brand-mark">AO</span><span>AgentOS</span></div>
-            <nav class="side-nav">
-              <a class="nav-item" href="/"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7"></path><path d="M6 10v10h12V10"></path></svg><span>Dashboard</span></a>
-              <a class="nav-item active" href="/control"><svg viewBox="0 0 24 24"><path d="M12 3l7 4v6c0 4-3 7-7 8-4-1-7-4-7-8V7l7-4z"></path></svg><span>Control Panels</span></a>
-              <a class="nav-item" href="/commands"><svg viewBox="0 0 24 24"><path d="M4 7h16M7 7v10M17 7v10M4 17h16"></path></svg><span>Commands</span></a>
-              <a class="nav-item" href="/ops"><svg viewBox="0 0 24 24"><path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path></svg><span>Ops Cheat Sheet</span></a>
-              <a class="nav-item" href="/agents"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg><span>Agents</span></a>
-              <a class="nav-item" href="/logs"><svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"></path><path d="M8 9h8M8 13h8M8 17h5"></path></svg><span>Logs</span></a>
-              <a class="nav-item" href="/settings"><svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"></path><path d="M4 12h2M18 12h2M12 4v2M12 18v2"></path></svg><span>Settings</span></a>
-            </nav>
-            """ + render_agent_links_section() + """
-          </aside>
+          """ + app_sidebar("control") + """
 
           <main class="shell main-panel">
           <section class="agents-panel glass" id="services" aria-label="System services">
@@ -4316,28 +4299,9 @@ def control_panel() -> str:
     """
 
 def app_sidebar(active: str) -> str:
-    items = [
-        ("dashboard", "/", "Dashboard", '<path d="M4 11l8-7 8 7"></path><path d="M6 10v10h12V10"></path>'),
-        ("control", "/control", "Control Panels", '<path d="M12 3l7 4v6c0 4-3 7-7 8-4-1-7-4-7-8V7l7-4z"></path>'),
-        ("commands", "/commands", "Commands", '<path d="M4 7h16M7 7v10M17 7v10M4 17h16"></path>'),
-        ("ops", "/ops", "Ops Cheat Sheet", '<path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path>'),
-        ("agents", "/agents", "Agents", '<path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path>'),
-        ("logs", "/logs", "Logs", '<path d="M5 5h14v14H5z"></path><path d="M8 9h8M8 13h8M8 17h5"></path>'),
-        ("settings", "/settings", "Settings", '<path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"></path><path d="M4 12h2M18 12h2M12 4v2M12 18v2"></path>'),
-    ]
-    links = []
-    for key, href, label, icon in items:
-        class_name = "nav-item active" if key == active else "nav-item"
-        links.append(f'<a class="{class_name}" href="{href}"><svg viewBox="0 0 24 24">{icon}</svg><span>{label}</span></a>')
-    return (
-        '<aside class="sidebar" aria-label="Primary navigation">'
-        '<div class="brand"><span class="brand-mark">AO</span><span>AgentOS</span></div>'
-        '<nav class="side-nav">'
-        + "".join(links)
-        + "</nav>"
-        + render_agent_links_section()
-        + "</aside>"
-    )
+    from apps.shared_layout import sidebar_html
+
+    return sidebar_html(active)
 
 
 def app_view_html(title: str, active: str, content: str, script: str = "") -> str:
@@ -4382,7 +4346,7 @@ def app_view_html(title: str, active: str, content: str, script: str = "") -> st
 
           .app-shell {
             display: grid;
-            grid-template-columns: 260px minmax(0, 1fr);
+            grid-template-columns: var(--ao-sidebar-width, 292px) minmax(0, 1fr);
             min-height: 100vh;
           }
 
@@ -5618,7 +5582,8 @@ def agents_page() -> str:
         action = agent.get("suggested_action", "")
         open_link = ""
         if agent.get("url"):
-            open_link = f'<a class="button secondary" href="{esc(agent["url"])}" target="_blank" rel="noopener noreferrer">Open</a>'
+            target_attrs = ' target="_blank" rel="noopener noreferrer"' if str(agent["url"]).startswith(("http://", "https://")) else ""
+            open_link = f'<a class="button secondary" href="{esc(agent["url"])}"{target_attrs}>Open</a>'
         cards.append(
             f"""
             <article class="registry-card glass">
@@ -5781,6 +5746,511 @@ def agents_page() -> str:
       </section>
     """
     return app_view_html("AgentOS Agents", "agents", content)
+
+
+def _response_body_text(response: HTMLResponse) -> str:
+    return response.body.decode("utf-8") if isinstance(response.body, bytes) else str(response.body)
+
+
+@app.get("/planner", response_class=HTMLResponse)
+def planner_page() -> str:
+    from apps.planner_agent import app as planner_app
+
+    return _response_body_text(planner_app.dashboard())
+
+
+@app.get("/tasks/{task_id}/view", response_class=HTMLResponse)
+def planner_task_page(task_id: str) -> str:
+    from apps.planner_agent import app as planner_app
+
+    return _response_body_text(planner_app.task_detail(task_id))
+
+
+@app.post("/tasks")
+async def planner_create_task(request: Request) -> dict:
+    from apps.planner_agent import app as planner_app
+    from apps.planner_agent.models import TaskCreate
+
+    return planner_app.create_task(TaskCreate(**await request.json())).dict()
+
+
+@app.post("/uploads/start")
+async def planner_upload_start(request: Request) -> dict:
+    from apps.planner_agent import app as planner_app
+    from apps.planner_agent.models import UploadStartRequest
+
+    return planner_app.start_upload(UploadStartRequest(**await request.json()))
+
+
+@app.put("/uploads/{upload_id}/files")
+async def planner_upload_file(upload_id: str, request: Request, x_relative_path: str | None = Header(default=None)) -> dict:
+    from apps.planner_agent import app as planner_app
+
+    return await planner_app.upload_file(upload_id, request, x_relative_path)
+
+
+@app.post("/uploads/{upload_id}/complete")
+async def planner_upload_complete(upload_id: str, request: Request) -> dict:
+    from apps.planner_agent import app as planner_app
+    from apps.planner_agent.models import UploadCompleteRequest
+
+    return planner_app.complete_upload(upload_id, UploadCompleteRequest(**await request.json())).dict()
+
+
+@app.post("/tasks/{task_id}/generate-fix-plan")
+def planner_generate_fix_plan(task_id: str) -> dict:
+    from apps.planner_agent import app as planner_app
+
+    return planner_app.generate_fix_plan(task_id)
+
+
+@app.post("/tasks/{task_id}/approve")
+async def planner_approve_task(task_id: str, request: Request) -> dict:
+    from apps.planner_agent import app as planner_app
+    from apps.planner_agent.models import ApprovalRequest
+
+    body = await request.json()
+    return planner_app.approve_task(task_id, ApprovalRequest(**body))
+
+
+@app.post("/tasks/{task_id}/reject")
+async def planner_reject_task(task_id: str, request: Request) -> dict:
+    from apps.planner_agent import app as planner_app
+    from apps.planner_agent.models import ApprovalRequest
+
+    body = await request.json()
+    return planner_app.reject_task(task_id, ApprovalRequest(**body))
+
+
+@app.post("/tasks/{task_id}/apply")
+def planner_apply_task(task_id: str):
+    from apps.planner_agent import app as planner_app
+
+    return planner_app.apply_task_to_staging(task_id).dict()
+
+
+@app.post("/tasks/{task_id}/send-to-coding-agent")
+def planner_send_to_coding(task_id: str) -> dict:
+    from apps.planner_agent import app as planner_app
+
+    result = planner_app.send_task_to_coding_agent(task_id)
+    if isinstance(result, dict) and str(result.get("staging_preview_url", "")).startswith("/"):
+        result["staging_preview_url"] = result["staging_preview_url"]
+    return result
+
+
+@app.get("/reports/{task_id}/view")
+def planner_report_view(task_id: str):
+    from apps.planner_agent import app as planner_app
+
+    return planner_app.view_report(task_id)
+
+
+@app.get("/coding", response_class=HTMLResponse)
+def coding_page() -> str:
+    from apps.coding_agent import app as coding_app
+
+    return _response_body_text(coding_app.home())
+
+
+@app.get("/reports/daily", response_class=HTMLResponse)
+def coding_daily_digest_page() -> str:
+    from apps.coding_agent import app as coding_app
+
+    return _response_body_text(coding_app.daily_digest())
+
+
+@app.get("/review/{task_id}", response_class=HTMLResponse)
+def coding_review_page(task_id: str) -> str:
+    from apps.coding_agent import app as coding_app
+
+    return _response_body_text(coding_app.review_page(task_id))
+
+
+@app.get("/reviews", response_class=HTMLResponse)
+def reviews_index_page() -> str:
+    content = """
+      <section class="command-card glass">
+        <div class="card-header">Reviews</div>
+        <p>Open a specific review from a staging preview or the daily digest.</p>
+        <p><a class="button secondary" href="/reports/daily">Open Daily Digest</a></p>
+      </section>
+    """
+    return app_view_html("Reviews", "reviews", content)
+
+
+@app.get("/staging/{task_id}", response_class=HTMLResponse)
+def coding_staging_page(task_id: str) -> str:
+    from apps.coding_agent import app as coding_app
+
+    return _response_body_text(coding_app.staging_preview(task_id))
+
+
+@app.get("/staging", response_class=HTMLResponse)
+def staging_index_page() -> str:
+    content = """
+      <section class="command-card glass">
+        <div class="card-header">Staging</div>
+        <p>Open a specific staging preview from Coding Agent output or the daily digest.</p>
+      </section>
+    """
+    return app_view_html("Staging", "staging", content)
+
+
+@app.get("/upload", response_class=HTMLResponse)
+def upload_page() -> str:
+    content = """
+      <section class="upload-card">
+        <div class="upload-head">
+          <div>
+            <h2>Upload Script Pipeline</h2>
+            <p>Drop a ZIP file or script folder here. AgentOS will plan, stage, and review it without touching live FiveM resources.</p>
+          </div>
+          <span class="safety-pill">Staging only</span>
+        </div>
+        <form id="uploadForm" class="upload-form">
+          <div id="dropZone" class="drop-zone" tabindex="0">
+            <div class="drop-icon">+</div>
+            <strong>Drag files or ZIPs here</strong>
+            <span>Folders work through the folder selector in supported browsers.</span>
+          </div>
+          <div class="picker-row">
+            <label class="picker-button">Select files<input id="fileInput" name="files" type="file" multiple accept=".zip,.lua,.js,.json,.cfg,.txt,.md,.html,.css"></label>
+            <label class="picker-button">Select folder<input id="folderInput" name="files" type="file" multiple webkitdirectory directory></label>
+            <button id="uploadButton" class="primary-button" type="submit">Upload and run pipeline</button>
+          </div>
+          <div id="fileList" class="file-list">No files selected.</div>
+        </form>
+      </section>
+      <section class="progress-card">
+        <div class="step" data-step="uploaded"><span></span><div><strong>Uploaded</strong><p>Files saved under incoming.</p></div></div>
+        <div class="step" data-step="planning"><span></span><div><strong>Planning</strong><p>Planner Agent analyzes the script.</p></div></div>
+        <div class="step" data-step="coding"><span></span><div><strong>Coding</strong><p>Coding Agent creates staged changes only.</p></div></div>
+        <div class="step" data-step="reviewing"><span></span><div><strong>Review</strong><p>Human-readable review is generated.</p></div></div>
+        <div class="step" data-step="done"><span></span><div><strong>Done</strong><p>Plan, staging, and review links are ready.</p></div></div>
+      </section>
+      <section id="resultCard" class="result-card hidden"></section>
+    """
+    return render_layout("Upload Pipeline", "upload", content, extra_css=_upload_page_css(), script=_upload_page_script(), subtitle="Planner to Coding to Review")
+
+
+@app.post("/upload")
+async def upload_pipeline(request: Request) -> dict[str, Any]:
+    upload_id = f"upload-{uuid4().hex[:12]}"
+    tracker = _upload_tracker(upload_id, "uploaded")
+    incoming_path = _safe_incoming_upload_path(upload_id, create=True)
+    try:
+        saved_files = await _save_upload_form(request, incoming_path)
+        extracted_files = _extract_upload_zips(incoming_path)
+    except ValueError as error:
+        tracker["status"] = "failed"
+        tracker["error"] = str(error)
+        tracker.setdefault("timestamps", {})["failed"] = _utc_now()
+        _save_upload_tracker(tracker)
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    tracker["files"] = saved_files
+    tracker["extracted_files"] = extracted_files
+    tracker["incoming_path"] = str(incoming_path)
+    _save_upload_tracker(tracker)
+
+    try:
+        _set_upload_status(tracker, "planning")
+        from apps.planner_agent import app as planner_app
+        from apps.planner_agent.models import TaskCreate
+
+        prompt = f"Analyze uploaded script folder {incoming_path.name}, create a QBCore compatibility plan, and keep all changes staged only."
+        planner_result = planner_app.create_task(
+            TaskCreate(
+                prompt=prompt,
+                title=f"Upload {incoming_path.name}",
+                description="Analyze uploaded script and prepare a safe staged QBCore conversion.",
+                script_path=str(incoming_path),
+            )
+        )
+        tracker["planner_task_id"] = planner_result.task_id
+        tracker["plan_url"] = f"/tasks/{planner_result.task_id}/view"
+        _save_upload_tracker(tracker)
+
+        _set_upload_status(tracker, "coding")
+        from apps.coding_agent import app as coding_app
+        from apps.coding_agent.app import TaskRequest
+
+        plan = planner_result.plan or {}
+        coding_result = coding_app.create_task(
+            TaskRequest(
+                prompt=_upload_coding_prompt(planner_result.task_id, plan),
+                script_path=str(incoming_path),
+                source_task_id=planner_result.task_id,
+                planner_json=planner_result.integration_analysis or plan.get("integration_analysis", {}),
+                mapping_rules=plan.get("mapping_rules", {}),
+            )
+        )
+        coding_task_id = str(coding_result.get("task_id", ""))
+        tracker["coding_task_id"] = coding_task_id
+        tracker["staging_url"] = coding_result.get("staging_preview_url") or f"/staging/{coding_task_id}"
+        _save_upload_tracker(tracker)
+
+        _set_upload_status(tracker, "reviewing")
+        tracker["review_url"] = coding_result.get("review_url") or f"/review/{coding_task_id}"
+        tracker["review_created"] = bool(coding_result.get("review_report"))
+        _set_upload_status(tracker, "done")
+        return tracker
+    except Exception as error:
+        tracker["status"] = "failed"
+        tracker["error"] = str(error)
+        tracker.setdefault("timestamps", {})["failed"] = _utc_now()
+        _save_upload_tracker(tracker)
+        raise
+
+
+@app.get("/upload/status/{task_id}")
+def upload_pipeline_status(task_id: str) -> dict[str, Any]:
+    try:
+        path = _upload_tracker_path(task_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if not path.is_file():
+        return {"task_id": task_id, "status": "missing", "message": "No upload pipeline task was found."}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _upload_page_css() -> str:
+    return """
+      .upload-card,.progress-card,.result-card{
+        border:1px solid var(--ao-border);
+        border-radius:12px;
+        background:var(--ao-panel);
+        box-shadow:0 18px 42px rgba(0,0,0,.22);
+        margin-bottom:18px;
+        overflow:hidden;
+      }
+      .upload-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;padding:20px;border-bottom:1px solid var(--ao-border)}
+      .upload-head h2{margin:0 0 6px;font-size:20px}
+      .upload-head p{margin:0;color:var(--ao-muted);line-height:1.5}
+      .safety-pill{white-space:nowrap;border:1px solid rgba(94,234,212,.35);border-radius:999px;color:#5eead4;background:rgba(20,184,166,.1);padding:6px 10px;font-size:12px;font-weight:800}
+      .upload-form{padding:18px}
+      .drop-zone{min-height:220px;border:2px dashed rgba(125,211,252,.35);border-radius:12px;background:rgba(5,12,24,.5);display:grid;place-items:center;text-align:center;gap:8px;padding:24px;color:var(--ao-muted);cursor:pointer;transition:border-color .16s,background .16s}
+      .drop-zone strong{display:block;color:var(--ao-text);font-size:19px}
+      .drop-zone.dragging{border-color:#5eead4;background:rgba(20,184,166,.12)}
+      .drop-icon{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;border:1px solid rgba(125,211,252,.35);color:#9fdcff;font-size:26px;font-weight:300;margin:auto}
+      .picker-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;align-items:center}
+      .picker-button,.primary-button,.result-card a{display:inline-flex;align-items:center;min-height:38px;border-radius:8px;border:1px solid rgba(125,211,252,.28);background:#10243a;color:#edf5ff;text-decoration:none;padding:8px 12px;font-weight:800;cursor:pointer}
+      .picker-button input{display:none}
+      .primary-button{background:#1d4ed8;border-color:#60a5fa}
+      .primary-button:disabled{opacity:.55;cursor:not-allowed}
+      .file-list{margin-top:14px;color:var(--ao-muted);line-height:1.55;overflow-wrap:anywhere}
+      .progress-card{padding:16px;display:grid;gap:10px}
+      .step{display:flex;gap:12px;align-items:flex-start;border:1px solid rgba(125,211,252,.14);border-radius:10px;padding:12px;background:rgba(5,12,24,.35)}
+      .step span{width:24px;height:24px;border-radius:50%;border:1px solid rgba(125,211,252,.35);display:grid;place-items:center;color:var(--ao-muted);flex:0 0 auto}
+      .step span::after{content:"";width:8px;height:8px;border-radius:50%;background:rgba(125,211,252,.35)}
+      .step p{margin:3px 0 0;color:var(--ao-muted)}
+      .step.done span{background:rgba(20,184,166,.16);border-color:rgba(94,234,212,.45);color:#5eead4}
+      .step.done span::after{content:"✓";width:auto;height:auto;background:transparent;font-size:13px;font-weight:900}
+      .step.active span{border-color:#fbbf24}
+      .step.active span::after{background:#fbbf24}
+      .step.failed span{border-color:#fb7185}
+      .step.failed span::after{background:#fb7185}
+      .result-card{padding:18px}
+      .result-card h2{margin:0 0 8px}
+      .result-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+      .hidden{display:none}
+      @media (max-width: 700px){.upload-head{display:block}.safety-pill{display:inline-flex;margin-top:12px}.picker-row>*{width:100%;justify-content:center}}
+    """
+
+
+def _upload_page_script() -> str:
+    return """
+      <script>
+        const dropZone = document.getElementById("dropZone");
+        const fileInput = document.getElementById("fileInput");
+        const folderInput = document.getElementById("folderInput");
+        const uploadForm = document.getElementById("uploadForm");
+        const fileList = document.getElementById("fileList");
+        const uploadButton = document.getElementById("uploadButton");
+        const resultCard = document.getElementById("resultCard");
+        let selectedFiles = [];
+
+        function setFiles(files) {
+          selectedFiles = Array.from(files || []);
+          if (!selectedFiles.length) {
+            fileList.textContent = "No files selected.";
+            return;
+          }
+          const preview = selectedFiles.slice(0, 8).map(file => file.webkitRelativePath || file.name).join(", ");
+          const more = selectedFiles.length > 8 ? ` and ${selectedFiles.length - 8} more` : "";
+          fileList.textContent = `${selectedFiles.length} file(s): ${preview}${more}`;
+        }
+
+        function setProgress(status) {
+          const order = ["uploaded", "planning", "coding", "reviewing", "done"];
+          const index = order.indexOf(status);
+          document.querySelectorAll(".step").forEach(step => {
+            const stepIndex = order.indexOf(step.dataset.step);
+            step.classList.remove("done", "active", "failed");
+            if (status === "failed") {
+              step.classList.add("failed");
+            } else if (stepIndex < index || status === "done") {
+              step.classList.add("done");
+            } else if (stepIndex === index) {
+              step.classList.add("active");
+            }
+          });
+        }
+
+        dropZone.addEventListener("click", () => fileInput.click());
+        fileInput.addEventListener("change", event => setFiles(event.target.files));
+        folderInput.addEventListener("change", event => setFiles(event.target.files));
+        dropZone.addEventListener("dragover", event => { event.preventDefault(); dropZone.classList.add("dragging"); });
+        dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragging"));
+        dropZone.addEventListener("drop", event => {
+          event.preventDefault();
+          dropZone.classList.remove("dragging");
+          setFiles(event.dataTransfer.files);
+        });
+
+        uploadForm.addEventListener("submit", async event => {
+          event.preventDefault();
+          if (!selectedFiles.length) {
+            fileList.textContent = "Choose a ZIP, files, or folder before uploading.";
+            return;
+          }
+          uploadButton.disabled = true;
+          resultCard.classList.add("hidden");
+          setProgress("uploaded");
+          const form = new FormData();
+          selectedFiles.forEach(file => form.append("files", file, file.webkitRelativePath || file.name));
+          try {
+            setProgress("planning");
+            const response = await fetch("/upload", { method: "POST", body: form });
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.detail || body.error || "Upload pipeline failed.");
+            setProgress("done");
+            resultCard.classList.remove("hidden");
+            resultCard.innerHTML = `
+              <h2>Pipeline Complete</h2>
+              <p>${body.files?.length || selectedFiles.length} uploaded file(s) were processed safely. Live FiveM resources were not modified.</p>
+              <div class="result-actions">
+                <a href="${body.plan_url || "#"}">View Plan</a>
+                <a href="${body.staging_url || "#"}">View Staging</a>
+                <a href="${body.review_url || "#"}">View Review</a>
+              </div>
+            `;
+          } catch (error) {
+            setProgress("failed");
+            resultCard.classList.remove("hidden");
+            resultCard.innerHTML = `<h2>Pipeline Stopped</h2><p>${String(error.message || error)}</p>`;
+          } finally {
+            uploadButton.disabled = false;
+          }
+        });
+      </script>
+    """
+
+
+async def _save_upload_form(request: Request, destination: Path) -> list[str]:
+    form = await request.form()
+    saved: list[str] = []
+    for _field, value in form.multi_items():
+        filename = getattr(value, "filename", None)
+        read = getattr(value, "read", None)
+        if not filename or not callable(read):
+            continue
+        relative_path = _safe_upload_relative_path(str(filename))
+        target = (destination / relative_path).resolve()
+        if destination.resolve() not in target.parents:
+            raise ValueError("Upload path escaped incoming folder.")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(await read())
+        saved.append(target.relative_to(destination).as_posix())
+    if not saved:
+        raise ValueError("No upload files were received.")
+    return saved
+
+
+def _safe_upload_relative_path(value: str) -> Path:
+    clean = value.replace("\\", "/").lstrip("/")
+    parts = [part for part in clean.split("/") if part and part not in {".", ".."}]
+    if not parts:
+        raise ValueError("Invalid upload filename.")
+    return Path(*parts)
+
+
+def _safe_incoming_upload_path(task_id: str, create: bool = False) -> Path:
+    if not task_id.startswith("upload-") or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789-" for char in task_id):
+        raise ValueError("Invalid upload task id.")
+    incoming_root = (BASE_DIR / "incoming").resolve()
+    path = (incoming_root / task_id).resolve()
+    if incoming_root not in path.parents:
+        raise ValueError("Invalid incoming upload path.")
+    if create:
+        path.mkdir(parents=True, exist_ok=False)
+    return path
+
+
+def _extract_upload_zips(destination: Path) -> list[str]:
+    extracted: list[str] = []
+    for archive in destination.rglob("*.zip"):
+        extract_root = destination / archive.stem
+        extract_root.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive) as zip_file:
+            for member in zip_file.infolist():
+                member_path = _safe_upload_relative_path(member.filename)
+                target = (extract_root / member_path).resolve()
+                if extract_root.resolve() not in target.parents and target != extract_root.resolve():
+                    continue
+                if member.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zip_file.open(member) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                extracted.append(target.relative_to(destination).as_posix())
+    return extracted
+
+
+def _upload_tracker(task_id: str, status: str) -> dict[str, Any]:
+    return {"task_id": task_id, "status": status, "timestamps": {status: _utc_now()}}
+
+
+def _upload_tracker_path(task_id: str) -> Path:
+    if not task_id.startswith("upload-") or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789-" for char in task_id):
+        raise ValueError("Invalid upload task id.")
+    root = (BASE_DIR / "reports" / "upload-pipeline").resolve()
+    path = (root / f"{task_id}.json").resolve()
+    if root != path.parent:
+        raise ValueError("Invalid upload tracker path.")
+    return path
+
+
+def _save_upload_tracker(tracker: dict[str, Any]) -> None:
+    path = _upload_tracker_path(str(tracker["task_id"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(tracker, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _set_upload_status(tracker: dict[str, Any], status: str) -> None:
+    tracker["status"] = status
+    tracker.setdefault("timestamps", {})[status] = _utc_now()
+    _save_upload_tracker(tracker)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _upload_coding_prompt(planner_task_id: str, plan: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"Use Planner Agent task {planner_task_id} to generate staged compatibility changes only.",
+            "Do not modify live FiveM resources, do not run SQL, do not restart services, and do not push to Git.",
+            "",
+            "Planner JSON:",
+            json.dumps(plan.get("integration_analysis", {}), indent=2, sort_keys=True),
+            "",
+            "Patch plan:",
+            "\n".join(f"- {item}" for item in plan.get("patch_plan_json", [])),
+        ]
+    )
 
 
 @app.get("/health")

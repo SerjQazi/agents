@@ -274,6 +274,9 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
     .nav {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; font-weight: 850; }}
     .nav a {{ color: var(--muted); padding: 6px 8px; border-radius: 7px; }}
     .nav a.active, .nav a:hover {{ color: var(--text); background: var(--accent-soft); text-decoration: none; }}
+    .page-nav {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
+    .page-nav a {{ color: var(--muted); padding: 7px 9px; border-radius: 7px; font-size: 13px; font-weight: 850; }}
+    .page-nav a.active, .page-nav a:hover {{ color: var(--text); background: var(--accent-soft); text-decoration: none; }}
     .table-wrap {{ width: 100%; max-width: 100%; overflow-x: visible; }}
     table {{ width: 100%; min-width: 0; border-collapse: collapse; font-size: 14px; table-layout: fixed; }}
     .tasks-table, .compact-table, .services-table {{ min-width: 0; }}
@@ -302,6 +305,8 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
     .cell-text, .cell-small {{ max-width: 100%; overflow-wrap: anywhere; white-space: normal; }}
     .task-title {{ display: block; color: var(--text); font-weight: 900; margin-bottom: 3px; }}
     .task-description {{ display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }}
+    .task-meta {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 12px; }}
+    .subtle-ref {{ color: var(--muted); font-size: 10px; opacity: .72; margin-top: 4px; }}
     .button-link {{
       display: inline-flex;
       align-items: center;
@@ -343,9 +348,9 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
       white-space: nowrap;
     }}
     .badge.active, .badge.planning, .badge.info {{ color: var(--accent-strong); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }}
-    .badge.completed, .badge.ready, .badge.staged, .badge.approved, .badge.ok, .badge.running, .badge.enabled, .badge.passed {{ color: var(--good); background: color-mix(in srgb, var(--good) 13%, transparent); border-color: color-mix(in srgb, var(--good) 30%, var(--line)); }}
-    .badge.warning, .badge.medium, .badge.blocked-review, .badge.inactive, .badge.disabled, .badge.not-seen, .badge.unknown, .badge.not-checked {{ color: var(--warn); background: color-mix(in srgb, var(--warn) 13%, transparent); border-color: color-mix(in srgb, var(--warn) 28%, var(--line)); }}
-    .badge.error, .badge.failed, .badge.high, .badge.not-found, .badge.unreachable, .badge.unhealthy {{ color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); border-color: color-mix(in srgb, var(--bad) 30%, var(--line)); }}
+    .badge.completed, .badge.ready, .badge.staged, .badge.approved, .badge.ok, .badge.running, .badge.enabled, .badge.passed, .badge.low-risk {{ color: var(--good); background: color-mix(in srgb, var(--good) 13%, transparent); border-color: color-mix(in srgb, var(--good) 30%, var(--line)); }}
+    .badge.warning, .badge.medium, .badge.moderate-risk, .badge.blocked-review, .badge.inactive, .badge.disabled, .badge.not-seen, .badge.unknown, .badge.not-checked {{ color: var(--warn); background: color-mix(in srgb, var(--warn) 13%, transparent); border-color: color-mix(in srgb, var(--warn) 28%, var(--line)); }}
+    .badge.error, .badge.failed, .badge.high, .badge.high-risk, .badge.not-found, .badge.unreachable, .badge.unhealthy {{ color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); border-color: color-mix(in srgb, var(--bad) 30%, var(--line)); }}
     .badge.reachable {{ color: var(--good); background: color-mix(in srgb, var(--good) 13%, transparent); border-color: color-mix(in srgb, var(--good) 30%, var(--line)); }}
     .actions {{ margin: 14px 16px 16px; display: flex; gap: 8px; flex-wrap: wrap; }}
     .actions button {{
@@ -404,6 +409,30 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
     }}
     .modal-card header {{ position: static; border-bottom: 1px solid var(--line-soft); background: var(--surface-2); }}
     .modal-content {{ padding: 16px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }}
+    .explain {{ position: relative; cursor: help; }}
+    .explain::after {{
+      content: attr(data-explain);
+      position: absolute;
+      left: 0;
+      top: calc(100% + 8px);
+      z-index: 30;
+      display: none;
+      width: min(420px, 78vw);
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: var(--shadow);
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      text-transform: none;
+      letter-spacing: 0;
+      font-weight: 650;
+    }}
+    .explain:hover::after, .explain:focus::after {{ display: block; }}
     .control-row {{ display: flex; gap: 10px; flex-wrap: wrap; padding: 16px; }}
     .control-row button, .control-row a {{
       appearance: none;
@@ -469,7 +498,7 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
       .panel-header {{ padding: 13px 14px; }}
       th, td {{ padding: 9px 10px; }}
       table {{ min-width: 0; }}
-      .paths-table {{ min-width: 520px; }}
+      .paths-table {{ min-width: 0; }}
       .theme-toggle {{ width: 100%; }}
       .theme-toggle button {{ flex: 1; }}
       .intro-content {{ grid-template-columns: 1fr; }}
@@ -640,9 +669,10 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
         <h1>Planner Agent</h1>
         <nav class="nav" aria-label="AgentOS navigation">
           <a href="/">Dashboard</a>
-          <a class="active" href="/">Planner Agent</a>
-          <a href="http://127.0.0.1:8020/">Coding Agent</a>
           <a href="/#agents">Agents</a>
+          <a class="active" href="/">Planner Agent</a>
+          <a href="http://100.68.10.125:8080/coding">Coding Agent</a>
+          <a href="/#logs">Logs</a>
         </nav>
         <div class="meta">A local planning cockpit for FiveM script fixes, compatibility scans, and careful next steps.</div>
       </div>
@@ -743,11 +773,11 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
       <p class="actions"><button disabled>Plan</button><button disabled>Apply</button><button disabled>Rollback</button></p>
     </section>
     <div class="grid">
-      {table_panel("📋", "Planning", [row for row in data["tasks"] if row.get("status") in {"planning", "active"}], ["task", "status", "created_at", "view"], "No active tasks right now.", "Submit a plan request and Planner Agent will track it here while it works.", table_class="tasks-table")}
-      {table_panel("📋", "Ready / Staged", [row for row in data["tasks"] if row.get("status") not in {"planning", "active"}], ["task", "status", "approval_status", "staging_path", "updated_at", "view"], "No completed tasks yet.", "Submit a plan request to get the first report on the board.", table_class="tasks-table")}
-      {table_panel("🔎", "Findings", data["findings"][:5], ["task_id", "severity", "category", "message", "view"], "No findings yet.", "Scans will surface dependencies, SQL files, framework clues, and risk notes here.", table_class="compact-table")}
-      {table_panel("📄", "Reports", data["reports"], ["task_id", "title", "created_at", "report"], "No reports yet.", "Completed plan requests will create markdown reports with review notes and test checklists.", table_class="compact-table")}
-      {table_panel("🧾", "Logs", data["logs"][:8], ["created_at", "task_id", "level", "action", "message"], "No logs yet.", "Planner Agent records task intake, scans, model calls, reports, and errors here.", table_class="compact-table")}
+      {table_panel("📋", "Planning", [row for row in data["tasks"] if row.get("status") in {"planning", "active"}], ["task", "status", "created_at_human", "view"], "No active tasks right now.", "Submit a plan request and Planner Agent will track it here while it works.", table_class="tasks-table")}
+      {table_panel("📋", "Ready / Staged", [row for row in data["tasks"] if row.get("status") not in {"planning", "active"}], ["task", "status", "risk_label", "updated_at", "view"], "No completed tasks yet.", "Submit a plan request to get the first report on the board.", table_class="tasks-table")}
+      {table_panel("🔎", "Findings", data["findings"][:5], ["task_name", "severity", "category", "message", "view"], "No findings yet.", "Scans will surface dependencies, SQL files, framework clues, and risk notes here.", table_class="compact-table")}
+      {table_panel("📄", "Reports", data["reports"], ["task_name", "title", "created_at_human", "report"], "No reports yet.", "Completed plan requests will create markdown reports with review notes and test checklists.", table_class="compact-table")}
+      {table_panel("🧾", "Logs", data["logs"][:8], ["created_at_human", "task_name", "level", "action", "message"], "No logs yet.", "Planner Agent records task intake, scans, model calls, reports, and errors here.", table_class="compact-table", panel_id="logs")}
       {memory_panel(data["memory_notes"])}
     </div>
   </main>
@@ -768,6 +798,10 @@ def esc(value: object) -> str:
 def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
     task = detail["task"]
     plan = detail.get("plan") or {}
+    task_name = task.get("task_name") or task.get("title") or "Planner Task"
+    task_summary = task.get("task_summary") or task.get("description") or task.get("summary") or "Planner task summary unavailable."
+    created_at_human = task.get("created_at_human") or task.get("created_at") or ""
+    risk_label = task.get("risk_label") or (plan.get("integration_analysis") or {}).get("risk_level", "Low Risk")
     apply_runs = detail.get("apply_runs") or []
     latest_apply = apply_runs[0] if apply_runs else {}
     validation = parse_json(latest_apply.get("validation_json", "{}")) if latest_apply else {}
@@ -790,6 +824,11 @@ def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
   <title>Planner Agent Task</title>
   <style>
     body {{ margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; background: #0d1726; color: #edf5ff; }}
+    header {{ position: sticky; top: 0; z-index: 10; border-bottom: 1px solid #203047; background: rgba(15, 27, 44, .94); backdrop-filter: blur(14px); }}
+    .topbar {{ max-width: 1180px; margin: 0 auto; padding: 14px 20px; display: flex; justify-content: space-between; gap: 14px; align-items: center; flex-wrap: wrap; }}
+    .page-nav {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
+    .page-nav a {{ color: #9fb1c7; padding: 7px 9px; border-radius: 7px; font-size: 13px; font-weight: 850; }}
+    .page-nav a.active, .page-nav a:hover {{ color: #edf5ff; background: #163453; text-decoration: none; }}
     main {{ max-width: 1180px; margin: 0 auto; padding: 20px; display: grid; gap: 16px; }}
     a {{ color: #67d8ff; font-weight: 750; text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
@@ -802,9 +841,9 @@ def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
     .note-box h3 {{ margin: 0 0 8px; font-size: 14px; color: #9fb1c7; }}
     code {{ background: #0b1422; border: 1px solid #203047; border-radius: 6px; padding: 2px 5px; overflow-wrap: anywhere; }}
     .badge {{ display: inline-flex; padding: 3px 8px; border-radius: 999px; border: 1px solid #31506f; background: #0b1422; color: #9fdcff; font-weight: 850; font-size: 12px; }}
-    .badge.approved, .badge.completed, .badge.passed {{ color: #5eead4; border-color: rgba(94, 234, 212, .35); }}
-    .badge.rejected, .badge.failed, .badge.unreachable, .badge.unhealthy {{ color: #fb7185; border-color: rgba(251, 113, 133, .35); }}
-    .badge.blocked-review, .badge.warning {{ color: #fbbf24; border-color: rgba(251, 191, 36, .38); }}
+    .badge.approved, .badge.completed, .badge.passed, .badge.low-risk {{ color: #5eead4; border-color: rgba(94, 234, 212, .35); }}
+    .badge.rejected, .badge.failed, .badge.high-risk, .badge.unreachable, .badge.unhealthy {{ color: #fb7185; border-color: rgba(251, 113, 133, .35); }}
+    .badge.blocked-review, .badge.warning, .badge.moderate-risk {{ color: #fbbf24; border-color: rgba(251, 191, 36, .38); }}
     .badge.reachable {{ color: #5eead4; border-color: rgba(94, 234, 212, .35); }}
     .warning-box {{ border: 1px solid rgba(251, 191, 36, .38); border-radius: 8px; background: rgba(251, 191, 36, .1); color: #ffe7a3; padding: 12px; line-height: 1.45; }}
     .control-row {{ display: flex; gap: 10px; flex-wrap: wrap; }}
@@ -815,13 +854,17 @@ def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
     button:disabled {{ opacity: .55; cursor: not-allowed; }}
     pre {{ margin: 0; max-height: 460px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #203047; border-radius: 8px; background: #08111f; color: #edf5ff; padding: 12px; font-size: 12px; line-height: 1.45; }}
     .task-subtitle {{ color: #9fb1c7; font-size: 13px; line-height: 1.45; margin-top: 4px; }}
-    .task-id {{ color: #8094ad; font-size: 11px; }}
+    .task-id {{ color: #8094ad; font-size: 10px; opacity: .7; margin-top: 5px; }}
+    .task-meta {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }}
     .finding-button {{ appearance: none; border: 0; background: transparent; color: #edf5ff; font: inherit; text-align: left; padding: 0; cursor: pointer; overflow-wrap: anywhere; }}
     .finding-button:hover {{ color: #67d8ff; text-decoration: underline; }}
     .modal-backdrop {{ position: fixed; inset: 0; display: none; place-items: center; z-index: 50; background: rgba(2, 8, 23, .72); padding: 18px; }}
     .modal-backdrop.open {{ display: grid; }}
     .modal-card {{ width: min(720px, 100%); max-height: 82vh; overflow: auto; border: 1px solid #253850; border-radius: 8px; background: #121f32; }}
     .modal-content {{ padding: 16px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }}
+    .explain {{ position: relative; cursor: help; }}
+    .explain::after {{ content: attr(data-explain); position: absolute; left: 0; top: calc(100% + 8px); z-index: 30; display: none; width: min(420px, 78vw); padding: 12px; border: 1px solid #253850; border-radius: 8px; background: #121f32; color: #edf5ff; box-shadow: 0 18px 48px rgba(0,0,0,.32); font-size: 13px; line-height: 1.45; white-space: normal; overflow-wrap: anywhere; font-weight: 650; }}
+    .explain:hover::after, .explain:focus::after {{ display: block; }}
     ul {{ margin: 0; padding-left: 18px; }}
   </style>
   <script>
@@ -839,7 +882,7 @@ def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
       fetch("/tasks/" + taskId + "/send-to-coding-agent", {{method: "POST"}})
         .then(function(response) {{ return response.json().then(function(body) {{ if (!response.ok) throw new Error(body.detail || "coding_agent handoff failed."); return body; }}); }})
         .then(function(body) {{
-          var preview = body.staging_preview_url ? " Preview: http://127.0.0.1:8020" + body.staging_preview_url : "";
+          var preview = body.staging_preview_url ? " Preview: " + body.staging_preview_url : "";
           status.textContent = "coding_agent task " + body.task_id + " staged." + preview;
         }})
         .catch(function(error) {{ status.textContent = error.message; }});
@@ -863,10 +906,27 @@ def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
   </script>
 </head>
 <body>
+  <header>
+    <div class="topbar">
+      <strong>AgentOS</strong>
+      <nav class="page-nav" aria-label="AgentOS navigation">
+        <a href="/">Dashboard</a>
+        <a href="/#agents">Agents</a>
+        <a class="active" href="/">Planner</a>
+        <a href="http://100.68.10.125:8080/coding">Coding</a>
+        <a href="/#logs">Logs</a>
+      </nav>
+    </div>
+  </header>
   <main>
     <section class="panel">
       <div class="panel-header">
-        <div><h1>📋 {esc(task.get("title") or task_id)}</h1><div class="task-subtitle">{esc(task.get("description") or task.get("prompt", ""))}</div><div class="task-id">{esc(task_id)}</div></div>
+        <div>
+          <h1>📋 {esc(task_name)}</h1>
+          <div class="task-subtitle">{esc(task_summary)}</div>
+          <div class="task-meta">{badge(task.get("status"))} {badge(risk_label)} <span>{esc(created_at_human)}</span></div>
+          <div class="task-id">Reference: {esc(task_id)}</div>
+        </div>
         <a class="button" href="/">Back to dashboard</a>
       </div>
       <div class="detail-body">
@@ -980,9 +1040,10 @@ def list_html(rows: list[dict[str, Any]], columns: list[str]) -> str:
             elif column == "message" and {"severity", "category"}.issubset(row):
                 title = f"{row.get('severity', 'info')} {row.get('category', 'finding')}"
                 evidence = row.get("evidence_json", "")
+                explanation = plain_explanation(row, "finding")
                 bits.append(
                     "<strong>message:</strong> "
-                    f"<button class='finding-button' title='{esc(value)}' onclick='openFindingModal({json_arg(title)}, {json_arg(value)}, {json_arg(evidence)})'>{esc(value)}</button>"
+                    f"<button class='finding-button explain' data-explain='{esc(explanation)}' title='{esc(value)}' onclick='openFindingModal({json_arg(title)}, {json_arg(value)}, {json_arg(evidence)})'>{esc(value)}</button>"
                 )
             else:
                 bits.append(f"<strong>{esc(column)}:</strong> {esc(value)}")
@@ -996,7 +1057,15 @@ def reports_html(rows: list[dict[str, Any]]) -> str:
     links = []
     for row in rows:
         task_id = esc(row.get("task_id", ""))
-        links.append(f"<li><a href='/reports/{task_id}/view' target='_blank' rel='noopener'>Open report</a> <code>{esc(row.get('path', ''))}</code></li>")
+        explanation = plain_explanation(row, "report")
+        links.append(
+            "<li>"
+            f"<span class='explain' tabindex='0' data-explain='{esc(explanation)}'>"
+            f"<a href='/reports/{task_id}/view' target='_blank' rel='noopener'>Open plain-English report</a>"
+            "</span>"
+            f" <span class='task-subtitle'>{esc(row.get('title', 'Planner report'))}</span>"
+            "</li>"
+        )
     return "<ul>" + "".join(links) + "</ul>"
 
 
@@ -1066,7 +1135,7 @@ def memory_panel(rows: list[dict[str, Any]]) -> str:
             "<div class='empty-state'><strong>No memory notes yet.</strong><span>Safety rules and compatibility lessons will appear here once the database is initialized.</span></div>"
             "</td></tr>"
         )
-    headers = "".join(f"<th>{esc(column)}</th>" for column in columns)
+    headers = "".join(f"<th>{esc(display_column(column))}</th>" for column in columns)
     return (
         f"<details class='memory-details panel standard'><summary class='panel-header'><h2>{icon_title('🧠', 'Memory')}</h2><span class='count'>{len(rows)} notes</span></summary>"
         f"<div class='panel-body table-wrap'><table class='compact-table'><thead><tr>{headers}</tr></thead><tbody>{body}</tbody></table></div>"
@@ -1083,6 +1152,7 @@ def table_panel(
     empty_detail: str,
     table_class: str = "",
     wrapper_tag: str = "section",
+    panel_id: str = "",
 ) -> str:
     body = ""
     if rows:
@@ -1095,9 +1165,10 @@ def table_panel(
             f"<div class='empty-state'><strong>{esc(empty_title)}</strong><span>{esc(empty_detail)}</span></div>"
             "</td></tr>"
         )
-    headers = "".join(f"<th>{esc(column)}</th>" for column in columns)
+    headers = "".join(f"<th>{esc(display_column(column))}</th>" for column in columns)
+    panel_id_attr = f" id='{esc(panel_id)}'" if panel_id else ""
     return (
-        f"<{wrapper_tag} class='panel standard'>"
+        f"<{wrapper_tag}{panel_id_attr} class='panel standard'>"
         f"<div class='panel-header'><h2>{icon_title(icon, title)}</h2><span class='count'>{len(rows)} shown</span></div>"
         f"<div class='panel-body table-wrap'><table class='{esc(table_class)}'><thead><tr>{headers}</tr></thead><tbody>{body}</tbody></table></div>"
         f"</{wrapper_tag}>"
@@ -1107,12 +1178,15 @@ def table_panel(
 def format_cell(value: object, column: str, row: dict[str, Any]) -> str:
     if column == "task":
         task_id = str(row.get("id", ""))
-        title = row.get("title") or _title_from_prompt(str(row.get("prompt", "")))
-        description = row.get("description") or row.get("summary") or row.get("prompt", "")
+        title = row.get("task_name") or row.get("title") or _title_from_prompt(str(row.get("prompt", "")))
+        description = row.get("task_summary") or row.get("description") or row.get("summary") or row.get("prompt", "")
+        created = row.get("created_at_human") or row.get("created_at") or ""
+        risk = row.get("risk_label") or "Low Risk"
         return (
             f"<a class='task-title' href='/tasks/{esc(task_id)}/view'>{esc(title)}</a>"
             f"<span class='task-description'>{esc(description)}</span>"
-            f"<span class='cell-id'>{esc(task_id)}</span>"
+            f"<span class='task-meta'>{badge(risk)} <span>{esc(created)}</span></span>"
+            f"<div class='subtle-ref'>Reference: {esc(task_id)}</div>"
         )
     if column == "view" and row.get("id"):
         task_id = esc(str(row["id"]))
@@ -1122,13 +1196,14 @@ def format_cell(value: object, column: str, row: dict[str, Any]) -> str:
         return f"<a class='button-link' href='/tasks/{task_id}/view'>View task</a>"
     if column == "report" and row.get("task_id"):
         task_id = esc(str(row["task_id"]))
-        return f"<a class='button-link' href='/reports/{task_id}/view' target='_blank' rel='noopener'>Open</a>"
+        return f"<a class='button-link explain' data-explain='{esc(plain_explanation(row, 'report'))}' href='/reports/{task_id}/view' target='_blank' rel='noopener'>Open</a>"
     if value is None:
         return ""
-    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
-    if len(text) > 120:
+    full_text = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
+    text = full_text
+    if len(text) > 120 and column not in {"message", "task_name", "title"}:
         text = text[:117] + "..."
-    if column in {"status", "severity", "level"}:
+    if column in {"status", "severity", "level", "risk_label"}:
         css_class = slug(text)
         return f"<span class='badge {css_class}'>{esc(text)}</span>"
     if column == "approval_status" or column == "apply_mode":
@@ -1137,7 +1212,18 @@ def format_cell(value: object, column: str, row: dict[str, Any]) -> str:
     if column == "id":
         return f"<a class='cell-id' href='/tasks/{esc(text)}/view'>{esc(text)}</a>"
     if column == "task_id":
-        return f"<a class='cell-id' href='/tasks/{esc(text)}/view'>{esc(text)}</a>"
+        label = row.get("task_name") or "Planner Task"
+        return f"<a class='cell-text' href='/tasks/{esc(text)}/view'>{esc(label)}</a>"
+    if column == "task_name":
+        task_id = str(row.get("task_id") or row.get("id") or "")
+        label = text or "Planner Task"
+        body = f"<span class='cell-text'>{esc(label)}</span>"
+        if task_id:
+            body = f"<a class='cell-text' href='/tasks/{esc(task_id)}/view'>{esc(label)}</a>"
+        summary = row.get("task_summary")
+        if summary:
+            body += f"<span class='task-description'>{esc(summary)}</span>"
+        return f"<span class='explain' tabindex='0' data-explain='{esc(plain_explanation(row, 'task'))}'>{body}</span>"
     if column == "path" and row.get("task_id"):
         task_id = esc(str(row["task_id"]))
         return f"<a href='/reports/{task_id}/view' target='_blank' rel='noopener'>Open report</a><br><code>{esc(text)}</code>"
@@ -1146,8 +1232,12 @@ def format_cell(value: object, column: str, row: dict[str, Any]) -> str:
     if column == "message" and {"severity", "category"}.issubset(row):
         title = f"{row.get('severity', 'info')} {row.get('category', 'finding')}"
         evidence = str(row.get("evidence_json", ""))
-        return f"<button class='finding-button' title='{esc(text)}' onclick='openFindingModal({json_arg(title)}, {json_arg(text)}, {json_arg(evidence)})'>{esc(text)}</button>"
-    css_class = "cell-text" if column in {"prompt", "summary", "message", "value", "title", "staging_path"} else ""
+        explanation = plain_explanation(row, "finding")
+        return f"<button class='finding-button explain' data-explain='{esc(explanation)}' title='{esc(full_text)}' onclick='openFindingModal({json_arg(title)}, {json_arg(full_text)}, {json_arg(evidence)})'>{esc(full_text)}</button>"
+    if column in {"action", "title"}:
+        kind = "log" if "level" in row and "action" in row else "report"
+        return f"<span class='cell-text explain' tabindex='0' data-explain='{esc(plain_explanation(row, kind))}'>{esc(text)}</span>"
+    css_class = "cell-text" if column in {"prompt", "summary", "message", "value", "title", "staging_path", "created_at_human", "updated_at"} else ""
     return f"<span class='{css_class}'>{esc(text)}</span>" if css_class else esc(text)
 
 
@@ -1162,3 +1252,58 @@ def _title_from_prompt(prompt: str) -> str:
 
 def json_arg(value: object) -> str:
     return esc(json.dumps(str(value)))
+
+
+def display_column(column: str) -> str:
+    return {
+        "task": "Task",
+        "task_name": "Task",
+        "task_id": "Task",
+        "created_at": "Created",
+        "created_at_human": "Created",
+        "updated_at": "Updated",
+        "risk_label": "Risk",
+        "approval_status": "Approval",
+        "staging_path": "Staging",
+        "view": "",
+    }.get(column, column.replace("_", " ").title())
+
+
+def plain_explanation(row: dict[str, Any], kind: str) -> str:
+    task_name = str(row.get("task_name") or "this task")
+    task_summary = str(row.get("task_summary") or "Planner is reviewing the script and preparing safe next steps.")
+    if kind == "finding":
+        category = str(row.get("category") or "scan result")
+        severity = str(row.get("severity") or "info")
+        message = str(row.get("message") or "Planner found something to review.")
+        evidence = row.get("evidence_json") or row.get("evidence") or ""
+        return (
+            f"What was detected: {message}\n"
+            f"Why it matters: This {severity} {category} note can affect whether the script works safely on the QBCore server.\n"
+            f"What will be done: Planner keeps the script read-only, records the evidence, and uses it to build staged fixes only.\n"
+            f"Task: {task_name}. {task_summary}\n"
+            f"Evidence: {evidence}"
+        )
+    if kind == "log":
+        action = str(row.get("action") or "system update")
+        message = str(row.get("message") or "")
+        level = str(row.get("level") or "info")
+        return (
+            f"What was detected: Planner recorded '{action}'. {message}\n"
+            f"Why it matters: This {level} log explains what happened while the task was processed.\n"
+            f"What will be done: The entry stays in the audit trail so you can trace the task without reading raw IDs.\n"
+            f"Task: {task_name}. {task_summary}"
+        )
+    if kind == "report":
+        title = str(row.get("title") or "Planner report")
+        return (
+            f"What was detected: A report named '{title}' is available.\n"
+            f"Why it matters: Reports summarize the scan, risks, recommended actions, and manual checks in one place.\n"
+            f"What will be done: Open it to review the plan before sending anything to Coding Agent or staging.\n"
+            f"Task: {task_name}. {task_summary}"
+        )
+    return (
+        f"What was detected: {task_name}.\n"
+        f"Why it matters: {task_summary}\n"
+        "What will be done: Planner keeps work staged and readable before any coding handoff."
+    )

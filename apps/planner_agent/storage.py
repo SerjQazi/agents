@@ -136,6 +136,10 @@ class Storage:
             self._ensure_column(conn, "tasks", "validation_status", "TEXT")
             self._ensure_column(conn, "tasks", "title", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "tasks", "description", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "tasks", "task_name", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "tasks", "task_summary", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "tasks", "created_at_human", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "tasks", "risk_label", "TEXT NOT NULL DEFAULT 'Low Risk'")
             self._ensure_column(conn, "plans", "integration_analysis_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "plans", "mapping_rules_json", "TEXT NOT NULL DEFAULT '{}'")
 
@@ -152,17 +156,22 @@ class Storage:
         model: str,
         title: str,
         description: str,
+        task_name: str,
+        task_summary: str,
+        created_at_human: str,
+        risk_label: str,
     ) -> None:
         now = utc_now()
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO tasks (
-                    id, title, description, prompt, script_path, model, status, approval_status, apply_mode, created_at, updated_at
+                    id, title, description, task_name, task_summary, created_at_human, risk_label,
+                    prompt, script_path, model, status, approval_status, apply_mode, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'planning', 'pending', 'none', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planning', 'pending', 'none', ?, ?)
                 """,
-                (task_id, title, description, prompt, script_path, model, now, now),
+                (task_id, title, description, task_name, task_summary, created_at_human, risk_label, prompt, script_path, model, now, now),
             )
 
     def update_task(self, task_id: str, status: str, summary: str) -> None:
@@ -170,6 +179,13 @@ class Storage:
             conn.execute(
                 "UPDATE tasks SET status = ?, summary = ?, updated_at = ? WHERE id = ?",
                 (status, summary, utc_now(), task_id),
+            )
+
+    def update_task_human_metadata(self, task_id: str, task_summary: str, risk_label: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET task_summary = ?, risk_label = ?, updated_at = ? WHERE id = ?",
+                (task_summary, risk_label, utc_now(), task_id),
             )
 
     def add_log(

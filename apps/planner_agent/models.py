@@ -19,6 +19,10 @@ class TaskResponse(BaseModel):
     task_id: str
     title: str
     description: str
+    task_name: str = ""
+    task_summary: str = ""
+    created_at_human: str = ""
+    risk_label: str = ""
     status: str
     summary: str
     report_path: str | None = None
