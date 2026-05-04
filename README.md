@@ -8,7 +8,7 @@ entrypoints remain at the repo root for existing commands and services.
 ## Layout
 
 ```text
-apps/       Dashboard applications: AgentOS, Builder Agent, Coding Agent
+apps/       Dashboard applications: AgentOS, Planner Agent, Coding Agent
 bots/       Assistant and notification bots
 cli/        Shell command implementations
 core/       Shared AgentOS core modules

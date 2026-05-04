@@ -271,11 +271,12 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
     .form-status {{ color: var(--muted); font-size: 13px; font-weight: 750; min-height: 20px; }}
     .form-status.ok {{ color: var(--good); }}
     .form-status.error {{ color: var(--bad); }}
-    .table-wrap {{ width: 100%; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }}
-    table {{ width: 100%; min-width: 720px; border-collapse: collapse; font-size: 14px; table-layout: auto; }}
-    .tasks-table {{ min-width: 760px; }}
-    .compact-table {{ min-width: 680px; }}
-    .services-table {{ min-width: 840px; }}
+    .nav {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; font-weight: 850; }}
+    .nav a {{ color: var(--muted); padding: 6px 8px; border-radius: 7px; }}
+    .nav a.active, .nav a:hover {{ color: var(--text); background: var(--accent-soft); text-decoration: none; }}
+    .table-wrap {{ width: 100%; max-width: 100%; overflow-x: visible; }}
+    table {{ width: 100%; min-width: 0; border-collapse: collapse; font-size: 14px; table-layout: fixed; }}
+    .tasks-table, .compact-table, .services-table {{ min-width: 0; }}
     .paths-table {{ min-width: 0; }}
     th, td {{
       text-align: left;
@@ -295,10 +296,12 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
       white-space: nowrap;
     }}
     tr:last-child td {{ border-bottom: 0; }}
-    td {{ overflow-wrap: normal; word-break: normal; line-height: 1.45; }}
-    .cell-id, .nowrap {{ white-space: nowrap; overflow-wrap: normal; word-break: normal; }}
-    .cell-text {{ max-width: 34rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-    .cell-small {{ max-width: 18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    td {{ overflow-wrap: anywhere; word-break: normal; line-height: 1.45; }}
+    .cell-id {{ color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }}
+    .nowrap {{ white-space: nowrap; }}
+    .cell-text, .cell-small {{ max-width: 100%; overflow-wrap: anywhere; white-space: normal; }}
+    .task-title {{ display: block; color: var(--text); font-weight: 900; margin-bottom: 3px; }}
+    .task-description {{ display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }}
     .button-link {{
       display: inline-flex;
       align-items: center;
@@ -339,8 +342,8 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
       font-weight: 850;
       white-space: nowrap;
     }}
-    .badge.active, .badge.info {{ color: var(--accent-strong); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }}
-    .badge.completed, .badge.ok, .badge.running, .badge.enabled, .badge.passed {{ color: var(--good); background: color-mix(in srgb, var(--good) 13%, transparent); border-color: color-mix(in srgb, var(--good) 30%, var(--line)); }}
+    .badge.active, .badge.planning, .badge.info {{ color: var(--accent-strong); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }}
+    .badge.completed, .badge.ready, .badge.staged, .badge.approved, .badge.ok, .badge.running, .badge.enabled, .badge.passed {{ color: var(--good); background: color-mix(in srgb, var(--good) 13%, transparent); border-color: color-mix(in srgb, var(--good) 30%, var(--line)); }}
     .badge.warning, .badge.medium, .badge.blocked-review, .badge.inactive, .badge.disabled, .badge.not-seen, .badge.unknown, .badge.not-checked {{ color: var(--warn); background: color-mix(in srgb, var(--warn) 13%, transparent); border-color: color-mix(in srgb, var(--warn) 28%, var(--line)); }}
     .badge.error, .badge.failed, .badge.high, .badge.not-found, .badge.unreachable, .badge.unhealthy {{ color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); border-color: color-mix(in srgb, var(--bad) 30%, var(--line)); }}
     .badge.reachable {{ color: var(--good); background: color-mix(in srgb, var(--good) 13%, transparent); border-color: color-mix(in srgb, var(--good) 30%, var(--line)); }}
@@ -354,6 +357,53 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
       opacity: 0.82;
     }}
     .actions button:hover {{ background: color-mix(in srgb, var(--surface-2) 80%, var(--accent-soft)); }}
+    .upload-drop {{
+      display: grid;
+      place-items: center;
+      min-height: 150px;
+      border: 2px dashed color-mix(in srgb, var(--accent) 42%, var(--line));
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--accent-soft) 36%, var(--surface-2));
+      color: var(--muted);
+      text-align: center;
+      padding: 18px;
+      cursor: pointer;
+    }}
+    .upload-drop.dragover {{ border-color: var(--accent); background: var(--accent-soft); color: var(--text); }}
+    .upload-drop strong {{ color: var(--text); }}
+    .finding-button {{
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      text-align: left;
+      padding: 0;
+      cursor: pointer;
+      overflow-wrap: anywhere;
+    }}
+    .finding-button:hover {{ color: var(--accent-strong); text-decoration: underline; }}
+    .modal-backdrop {{
+      position: fixed;
+      inset: 0;
+      display: none;
+      place-items: center;
+      z-index: 50;
+      background: rgba(2, 8, 23, .62);
+      padding: 18px;
+    }}
+    .modal-backdrop.open {{ display: grid; }}
+    .modal-card {{
+      width: min(720px, 100%);
+      max-height: 82vh;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }}
+    .modal-card header {{ position: static; border-bottom: 1px solid var(--line-soft); background: var(--surface-2); }}
+    .modal-content {{ padding: 16px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }}
     .control-row {{ display: flex; gap: 10px; flex-wrap: wrap; padding: 16px; }}
     .control-row button, .control-row a {{
       appearance: none;
@@ -418,7 +468,7 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
       .grid {{ gap: 12px; }}
       .panel-header {{ padding: 13px 14px; }}
       th, td {{ padding: 9px 10px; }}
-      table {{ min-width: 640px; }}
+      table {{ min-width: 0; }}
       .paths-table {{ min-width: 520px; }}
       .theme-toggle {{ width: 100%; }}
       .theme-toggle button {{ flex: 1; }}
@@ -471,6 +521,8 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
             headers: {{"Content-Type": "application/json"}},
             body: JSON.stringify({{
               prompt: prompt,
+              title: form.title.value.trim() || null,
+              description: form.description.value.trim() || null,
               script_path: scriptPath || null,
               model: form.model.value || null
             }})
@@ -496,7 +548,88 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
               button.disabled = false;
             }});
         }});
+        setupUpload();
       }});
+      window.openFindingModal = function (title, message, evidence) {{
+        var modal = document.getElementById("finding-modal");
+        document.getElementById("finding-modal-title").textContent = title || "Finding details";
+        document.getElementById("finding-modal-content").textContent = message + (evidence ? "\\n\\nEvidence:\\n" + evidence : "");
+        modal.classList.add("open");
+      }};
+      window.closeFindingModal = function () {{
+        document.getElementById("finding-modal").classList.remove("open");
+      }};
+      function setupUpload() {{
+        var drop = document.getElementById("upload-drop");
+        var fileInput = document.getElementById("upload-files");
+        var folderInput = document.getElementById("upload-folder");
+        var status = document.getElementById("upload-status");
+        if (!drop || !fileInput || !folderInput || !status) return;
+        function chooseTitle(files) {{
+          if (!files.length) return "Uploaded script";
+          var first = files[0].webkitRelativePath || files[0].name;
+          return first.split("/")[0].replace(/\\.zip$/i, "") || "Uploaded script";
+        }}
+        function uploadFiles(files) {{
+          files = Array.prototype.slice.call(files || []);
+          if (!files.length) return;
+          var title = chooseTitle(files);
+          status.textContent = "Preparing upload...";
+          fetch("/uploads/start", {{
+            method: "POST",
+            headers: {{"Content-Type": "application/json"}},
+            body: JSON.stringify({{title: title, description: "Uploaded through Planner Agent UI"}})
+          }})
+            .then(function (response) {{ return response.json().then(function (body) {{ if (!response.ok) throw new Error(body.detail || "Upload failed."); return body; }}); }})
+            .then(function (upload) {{
+              var chain = Promise.resolve();
+              files.forEach(function (file) {{
+                chain = chain.then(function () {{
+                  var relativePath = file.webkitRelativePath || file.name;
+                  status.textContent = "Uploading " + relativePath;
+                  return fetch("/uploads/" + upload.upload_id + "/files", {{
+                    method: "PUT",
+                    headers: {{"X-Relative-Path": relativePath}},
+                    body: file
+                  }}).then(function (response) {{
+                    if (!response.ok) throw new Error("Failed uploading " + relativePath);
+                  }});
+                }});
+              }});
+              return chain.then(function () {{
+                status.textContent = "Creating Planner task...";
+                return fetch("/uploads/" + upload.upload_id + "/complete", {{
+                  method: "POST",
+                  headers: {{"Content-Type": "application/json"}},
+                  body: JSON.stringify({{title: title}})
+                }});
+              }});
+            }})
+            .then(function (response) {{ return response.json().then(function (body) {{ if (!response.ok) throw new Error(body.detail || "Task creation failed."); return body; }}); }})
+            .then(function (body) {{
+              status.textContent = "Task ready: " + body.title;
+              window.setTimeout(function () {{ window.location.href = "/tasks/" + body.task_id + "/view"; }}, 700);
+            }})
+            .catch(function (error) {{
+              status.textContent = error.message;
+              status.className = "form-status error";
+            }});
+        }}
+        drop.addEventListener("click", function () {{ fileInput.click(); }});
+        drop.addEventListener("dragover", function (event) {{ event.preventDefault(); drop.classList.add("dragover"); }});
+        drop.addEventListener("dragleave", function () {{ drop.classList.remove("dragover"); }});
+        drop.addEventListener("drop", function (event) {{
+          event.preventDefault();
+          drop.classList.remove("dragover");
+          uploadFiles(event.dataTransfer.files);
+        }});
+        fileInput.addEventListener("change", function () {{ uploadFiles(fileInput.files); }});
+        folderInput.addEventListener("change", function () {{ uploadFiles(folderInput.files); }});
+        document.getElementById("upload-folder-button").addEventListener("click", function (event) {{
+          event.stopPropagation();
+          folderInput.click();
+        }});
+      }}
     }})();
   </script>
 </head>
@@ -505,6 +638,12 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
     <div class="topbar">
       <div>
         <h1>Planner Agent</h1>
+        <nav class="nav" aria-label="AgentOS navigation">
+          <a href="/">Dashboard</a>
+          <a class="active" href="/">Planner Agent</a>
+          <a href="http://127.0.0.1:8020/">Coding Agent</a>
+          <a href="/#agents">Agents</a>
+        </nav>
         <div class="meta">A local planning cockpit for FiveM script fixes, compatibility scans, and careful next steps.</div>
       </div>
       <div class="header-actions">
@@ -538,6 +677,16 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
         <form id="new-task-form" class="task-form">
           <div class="form-grid">
             <label>
+              Title
+              <input name="title" placeholder="Auto-generated from prompt if left blank">
+            </label>
+            <label>
+              Description
+              <input name="description" placeholder="Short human-readable task context">
+            </label>
+          </div>
+          <div class="form-grid">
+            <label>
               Prompt
               <textarea name="prompt" required placeholder="Example: Adapt this script from ESX to QBCore."></textarea>
             </label>
@@ -562,6 +711,20 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
         </form>
       </div>
     </section>
+    <section class="panel wide">
+      <div class="panel-header">
+        <h2>{icon_title("⬆️", "Upload")}</h2>
+        <span class="count">zip, folders, files</span>
+      </div>
+      <div class="form-body">
+        <div id="upload-drop" class="upload-drop" role="button" tabindex="0">
+          <div><strong>Drop files, folders, or ZIPs here</strong><br>or click to choose files. <button id="upload-folder-button" type="button">Choose folder</button></div>
+        </div>
+        <input id="upload-files" type="file" multiple hidden accept=".zip,*/*">
+        <input id="upload-folder" type="file" webkitdirectory directory multiple hidden>
+        <div id="upload-status" class="form-status" role="status" aria-live="polite"></div>
+      </div>
+    </section>
     {services_panel(data.get("service_inventory", {}))}
     <section class="panel wide">
       <div class="panel-header">
@@ -580,14 +743,20 @@ def render_dashboard(config: PlannerConfig, data: dict[str, list[dict[str, Any]]
       <p class="actions"><button disabled>Plan</button><button disabled>Apply</button><button disabled>Rollback</button></p>
     </section>
     <div class="grid">
-      {table_panel("📋", "Active Tasks", [row for row in data["tasks"] if row.get("status") == "active"], ["id", "prompt", "model", "created_at", "view"], "No active tasks right now.", "Submit a plan request and Planner Agent will track it here while it works.", table_class="tasks-table")}
-      {table_panel("📋", "Completed Tasks", [row for row in data["tasks"] if row.get("status") != "active"], ["id", "status", "approval_status", "apply_mode", "updated_at", "view"], "No completed tasks yet.", "Submit a plan request to get the first report on the board.", table_class="tasks-table")}
+      {table_panel("📋", "Planning", [row for row in data["tasks"] if row.get("status") in {"planning", "active"}], ["task", "status", "created_at", "view"], "No active tasks right now.", "Submit a plan request and Planner Agent will track it here while it works.", table_class="tasks-table")}
+      {table_panel("📋", "Ready / Staged", [row for row in data["tasks"] if row.get("status") not in {"planning", "active"}], ["task", "status", "approval_status", "staging_path", "updated_at", "view"], "No completed tasks yet.", "Submit a plan request to get the first report on the board.", table_class="tasks-table")}
       {table_panel("🔎", "Findings", data["findings"][:5], ["task_id", "severity", "category", "message", "view"], "No findings yet.", "Scans will surface dependencies, SQL files, framework clues, and risk notes here.", table_class="compact-table")}
       {table_panel("📄", "Reports", data["reports"], ["task_id", "title", "created_at", "report"], "No reports yet.", "Completed plan requests will create markdown reports with review notes and test checklists.", table_class="compact-table")}
       {table_panel("🧾", "Logs", data["logs"][:8], ["created_at", "task_id", "level", "action", "message"], "No logs yet.", "Planner Agent records task intake, scans, model calls, reports, and errors here.", table_class="compact-table")}
       {memory_panel(data["memory_notes"])}
     </div>
   </main>
+  <div id="finding-modal" class="modal-backdrop" onclick="if (event.target === this) closeFindingModal()">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="finding-modal-title">
+      <header class="panel-header"><h2 id="finding-modal-title">Finding details</h2><button type="button" onclick="closeFindingModal()">Close</button></header>
+      <div id="finding-modal-content" class="modal-content"></div>
+    </div>
+  </div>
 </body>
 </html>"""
 
@@ -626,7 +795,7 @@ def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
     a:hover {{ text-decoration: underline; }}
     .panel {{ background: #121f32; border: 1px solid #253850; border-radius: 8px; overflow: hidden; box-shadow: 0 18px 48px rgba(0, 0, 0, .28); }}
     .panel-header {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 15px 16px; border-bottom: 1px solid #203047; background: #0f1b2c; }}
-    .panel-header h1, .panel-header h2 {{ margin: 0; font-size: 18px; }}
+    .panel-header h1, .panel-header h2 {{ margin: 0; font-size: 18px; overflow-wrap: anywhere; }}
     .detail-body {{ padding: 16px; display: grid; gap: 14px; }}
     .detail-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }}
     .note-box {{ border: 1px solid #203047; border-radius: 8px; background: #0d1828; padding: 12px; }}
@@ -644,7 +813,15 @@ def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
     button.primary {{ background: linear-gradient(180deg, #38bdf8, #60a5fa); color: #00111f; }}
     button.danger {{ color: #fb7185; }}
     button:disabled {{ opacity: .55; cursor: not-allowed; }}
-    pre {{ margin: 0; max-height: 460px; overflow: auto; white-space: pre; border: 1px solid #203047; border-radius: 8px; background: #08111f; color: #edf5ff; padding: 12px; font-size: 12px; line-height: 1.45; }}
+    pre {{ margin: 0; max-height: 460px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #203047; border-radius: 8px; background: #08111f; color: #edf5ff; padding: 12px; font-size: 12px; line-height: 1.45; }}
+    .task-subtitle {{ color: #9fb1c7; font-size: 13px; line-height: 1.45; margin-top: 4px; }}
+    .task-id {{ color: #8094ad; font-size: 11px; }}
+    .finding-button {{ appearance: none; border: 0; background: transparent; color: #edf5ff; font: inherit; text-align: left; padding: 0; cursor: pointer; overflow-wrap: anywhere; }}
+    .finding-button:hover {{ color: #67d8ff; text-decoration: underline; }}
+    .modal-backdrop {{ position: fixed; inset: 0; display: none; place-items: center; z-index: 50; background: rgba(2, 8, 23, .72); padding: 18px; }}
+    .modal-backdrop.open {{ display: grid; }}
+    .modal-card {{ width: min(720px, 100%); max-height: 82vh; overflow: auto; border: 1px solid #253850; border-radius: 8px; background: #121f32; }}
+    .modal-content {{ padding: 16px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }}
     ul {{ margin: 0; padding-left: 18px; }}
   </style>
   <script>
@@ -661,8 +838,27 @@ def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
       status.textContent = "Sending to coding_agent...";
       fetch("/tasks/" + taskId + "/send-to-coding-agent", {{method: "POST"}})
         .then(function(response) {{ return response.json().then(function(body) {{ if (!response.ok) throw new Error(body.detail || "coding_agent handoff failed."); return body; }}); }})
-        .then(function(body) {{ status.textContent = "coding_agent task " + body.task_id + " completed. Report: " + (body.report_path || "none"); }})
+        .then(function(body) {{
+          var preview = body.staging_preview_url ? " Preview: http://127.0.0.1:8020" + body.staging_preview_url : "";
+          status.textContent = "coding_agent task " + body.task_id + " staged." + preview;
+        }})
         .catch(function(error) {{ status.textContent = error.message; }});
+    }}
+    function generateFixPlan(taskId) {{
+      var status = document.getElementById("fix-plan-status");
+      status.textContent = "Generating fix plan...";
+      fetch("/tasks/" + taskId + "/generate-fix-plan", {{method: "POST"}})
+        .then(function(response) {{ return response.json().then(function(body) {{ if (!response.ok) throw new Error(body.detail || "Fix plan failed."); return body; }}); }})
+        .then(function(body) {{ status.textContent = "Fix plan ready: " + (body.recommended_actions || []).length + " recommended actions."; }})
+        .catch(function(error) {{ status.textContent = error.message; }});
+    }}
+    function openFindingModal(title, message, evidence) {{
+      document.getElementById("finding-modal-title").textContent = title || "Finding details";
+      document.getElementById("finding-modal-content").textContent = message + (evidence ? "\\n\\nEvidence:\\n" + evidence : "");
+      document.getElementById("finding-modal").classList.add("open");
+    }}
+    function closeFindingModal() {{
+      document.getElementById("finding-modal").classList.remove("open");
     }}
   </script>
 </head>
@@ -670,7 +866,7 @@ def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
   <main>
     <section class="panel">
       <div class="panel-header">
-        <h1>📋 Task {esc(task_id)}</h1>
+        <div><h1>📋 {esc(task.get("title") or task_id)}</h1><div class="task-subtitle">{esc(task.get("description") or task.get("prompt", ""))}</div><div class="task-id">{esc(task_id)}</div></div>
         <a class="button" href="/">Back to dashboard</a>
       </div>
       <div class="detail-body">
@@ -686,13 +882,16 @@ def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
           <button class="primary" onclick="postAction('/tasks/{esc(task_id)}/approve')">Approve</button>
           <button class="danger" onclick="postAction('/tasks/{esc(task_id)}/reject')">Reject</button>
           <button onclick="postAction('/tasks/{esc(task_id)}/apply')">Apply to staging only</button>
-          <button onclick="sendToCodingAgent('{esc(task_id)}')">Send to coding_agent</button>
+          <button onclick="generateFixPlan('{esc(task_id)}')">Generate Fix Plan</button>
+          <button onclick="sendToCodingAgent('{esc(task_id)}')">Send to Coding Agent</button>
           <button disabled>Live apply disabled</button>
           <span id="action-status"></span>
+          <span id="fix-plan-status"></span>
           <span id="coding-agent-status"></span>
         </div>
       </div>
     </section>
+    <section class="panel"><div class="panel-header"><h2>Detected Issues</h2>{badge((plan.get("integration_analysis") or {}).get("risk_level", "unknown"))}</div><div class="detail-body">{issues_html((plan.get("integration_analysis") or {}).get("issues", []))}</div></section>
     <section class="panel"><div class="panel-header"><h2>Generated Plan</h2></div><div class="detail-body">{plan_html(plan)}</div></section>
     <section class="panel"><div class="panel-header"><h2>Findings</h2></div><div class="detail-body">{list_html(detail.get("findings", []), ["severity", "category", "message"])}</div></section>
     <section class="panel"><div class="panel-header"><h2>Reports</h2></div><div class="detail-body">{reports_html(detail.get("reports", []))}</div></section>
@@ -700,6 +899,12 @@ def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
     <section class="panel"><div class="panel-header"><h2>Diff Preview</h2></div><div class="detail-body"><pre>{esc(diff_text or "No staging diff generated yet.")}</pre></div></section>
     <section class="panel"><div class="panel-header"><h2>Logs</h2></div><div class="detail-body">{list_html(detail.get("logs", []), ["created_at", "level", "action", "message"])}</div></section>
   </main>
+  <div id="finding-modal" class="modal-backdrop" onclick="if (event.target === this) closeFindingModal()">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="finding-modal-title">
+      <div class="panel-header"><h2 id="finding-modal-title">Finding details</h2><button type="button" onclick="closeFindingModal()">Close</button></div>
+      <div id="finding-modal-content" class="modal-content"></div>
+    </div>
+  </div>
 </body>
 </html>"""
 
@@ -725,6 +930,7 @@ def plan_html(plan: dict[str, Any]) -> str:
         return "<div class='note-box'>No plan stored for this task.</div>"
     sections = [
         ("Summary", plan.get("summary", "")),
+        ("Integration JSON", json.dumps(plan.get("integration_analysis", {}), indent=2, sort_keys=True)),
         ("Risks", plan.get("risks_json", [])),
         ("Files It Would Change", plan.get("files_json", [])),
         ("Backup Plan", plan.get("backup_plan_json", [])),
@@ -735,6 +941,22 @@ def plan_html(plan: dict[str, Any]) -> str:
     for title, value in sections:
         html_parts.append(f"<div class='note-box'><h3>{esc(title)}</h3>{value_html(value)}</div>")
     return "".join(html_parts)
+
+
+def issues_html(issues: list[dict[str, Any]]) -> str:
+    if not issues:
+        return "<div class='note-box'>No structured integration issues detected.</div>"
+    cards = []
+    for issue in issues:
+        issue_type = str(issue.get("type", "integration"))
+        cards.append(
+            "<div class='note-box'>"
+            f"<h3>{badge(issue_type)} <code>{esc(issue.get('file', 'unknown'))}</code></h3>"
+            f"<p><strong>Problem:</strong> {esc(issue.get('problem', ''))}</p>"
+            f"<p><strong>Fix strategy:</strong> {esc(issue.get('fix_strategy', ''))}</p>"
+            "</div>"
+        )
+    return "".join(cards)
 
 
 def value_html(value: object) -> str:
@@ -755,6 +977,13 @@ def list_html(rows: list[dict[str, Any]], columns: list[str]) -> str:
             value = row.get(column, "")
             if column in {"status", "severity", "level", "decision"}:
                 bits.append(badge(value))
+            elif column == "message" and {"severity", "category"}.issubset(row):
+                title = f"{row.get('severity', 'info')} {row.get('category', 'finding')}"
+                evidence = row.get("evidence_json", "")
+                bits.append(
+                    "<strong>message:</strong> "
+                    f"<button class='finding-button' title='{esc(value)}' onclick='openFindingModal({json_arg(title)}, {json_arg(value)}, {json_arg(evidence)})'>{esc(value)}</button>"
+                )
             else:
                 bits.append(f"<strong>{esc(column)}:</strong> {esc(value)}")
         items.append("<li>" + " &nbsp; ".join(bits) + "</li>")
@@ -810,7 +1039,7 @@ def services_panel(inventory: dict[str, Any]) -> str:
     ) or "<li>No matching systemd services found.</li>"
     process_list = "".join(f"<li><code>{esc(line)}</code></li>" for line in matching_processes[:8]) or "<li>No matching processes found.</li>"
     return (
-        "<section class='panel wide'>"
+        "<section id='agents' class='panel wide'>"
         f"<div class='panel-header'><h2>{icon_title('🛰️', 'Agents / Services')}</h2><span class='count'>{len(agents)} known</span></div>"
         "<div class='panel-body table-wrap'>"
         "<table class='services-table'><thead><tr><th>Agent</th><th>Service</th><th>Running</th><th>Auto-start</th><th>Process</th><th>Health</th><th>Process hint</th></tr></thead>"
@@ -876,6 +1105,15 @@ def table_panel(
 
 
 def format_cell(value: object, column: str, row: dict[str, Any]) -> str:
+    if column == "task":
+        task_id = str(row.get("id", ""))
+        title = row.get("title") or _title_from_prompt(str(row.get("prompt", "")))
+        description = row.get("description") or row.get("summary") or row.get("prompt", "")
+        return (
+            f"<a class='task-title' href='/tasks/{esc(task_id)}/view'>{esc(title)}</a>"
+            f"<span class='task-description'>{esc(description)}</span>"
+            f"<span class='cell-id'>{esc(task_id)}</span>"
+        )
     if column == "view" and row.get("id"):
         task_id = esc(str(row["id"]))
         return f"<a class='button-link' href='/tasks/{task_id}/view'>View</a>"
@@ -905,9 +1143,22 @@ def format_cell(value: object, column: str, row: dict[str, Any]) -> str:
         return f"<a href='/reports/{task_id}/view' target='_blank' rel='noopener'>Open report</a><br><code>{esc(text)}</code>"
     if not text:
         return "<span class='cell-muted'>None</span>"
-    css_class = "cell-text" if column in {"prompt", "summary", "message", "value", "title"} else ""
+    if column == "message" and {"severity", "category"}.issubset(row):
+        title = f"{row.get('severity', 'info')} {row.get('category', 'finding')}"
+        evidence = str(row.get("evidence_json", ""))
+        return f"<button class='finding-button' title='{esc(text)}' onclick='openFindingModal({json_arg(title)}, {json_arg(text)}, {json_arg(evidence)})'>{esc(text)}</button>"
+    css_class = "cell-text" if column in {"prompt", "summary", "message", "value", "title", "staging_path"} else ""
     return f"<span class='{css_class}'>{esc(text)}</span>" if css_class else esc(text)
 
 
 def slug(value: str) -> str:
     return "".join(char.lower() if char.isalnum() else "-" for char in value).strip("-")
+
+
+def _title_from_prompt(prompt: str) -> str:
+    text = " ".join(prompt.split())
+    return text[:90] or "Planner task"
+
+
+def json_arg(value: object) -> str:
+    return esc(json.dumps(str(value)))

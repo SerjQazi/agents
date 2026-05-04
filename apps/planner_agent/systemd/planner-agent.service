@@ -1,0 +1,16 @@
+[Unit]
+Description=Planner Agent local dashboard/API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agentzero
+WorkingDirectory=/home/agentzero/agents
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/agentzero/venv/bin/uvicorn apps.planner_agent.app:app --host 100.68.10.125 --port 8010
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

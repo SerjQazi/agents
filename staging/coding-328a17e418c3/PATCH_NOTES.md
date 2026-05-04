@@ -1,0 +1,164 @@
+# Coding Agent Staging Notes - coding-328a17e418c3
+
+Created: 2026-05-04T20:41:02+00:00
+Source Planner Task: planner-sample
+Script Path: incoming/test-bad-script
+
+## Patch Notes
+
+- Generated staging-only compatibility patches from Planner JSON.
+- No live resources were modified.
+- No SQL was executed.
+- No Git push or server restart was run.
+- Every generated source edit is wrapped with AGENT FIX START and AGENT FIX END markers.
+- Review the plan before manually applying any code changes.
+
+## Generated Plan
+
+Placeholder compatibility plan only. No files were modified.
+
+- Prompt reviewed: Generate staged QBCore compatibility fixes from Planner JSON.
+- Files scanned: 3
+- Future checks will cover ESX to QBCore, ox_inventory to qb-inventory, ox_target to qb-target, and mysql-async to oxmysql.
+- SQL execution, live apply, Git push, FiveM restart, and qb-core edits remain blocked.
+
+## Planner JSON
+
+{
+  "dependencies_detected": [
+    "es_extended",
+    "mysql-async",
+    "ox_target"
+  ],
+  "files_scanned": [
+    "client.lua",
+    "fxmanifest.lua",
+    "server.lua"
+  ],
+  "framework_detected": "ESX",
+  "issues": [
+    {
+      "file": "client.lua",
+      "fix_strategy": "Map ox_target exports/options to qb-target equivalents in staged files.",
+      "problem": "Targeting API usage needs server target-system alignment.",
+      "type": "targeting"
+    },
+    {
+      "file": "client.lua",
+      "fix_strategy": "Map `local ESX = exports['es_extended']:getSharedObject()` to `local QBCore = exports['qb-core']:GetCoreObject()` inside staged output.",
+      "problem": "Legacy or non-target API `local ESX = exports['es_extended']:getSharedObject()` detected.",
+      "type": "mapping"
+    },
+    {
+      "file": "client.lua",
+      "fix_strategy": "Map `exports['es_extended']:getSharedObject()` to `exports['qb-core']:GetCoreObject()` inside staged output.",
+      "problem": "Legacy or non-target API `exports['es_extended']:getSharedObject()` detected.",
+      "type": "mapping"
+    },
+    {
+      "file": "client.lua",
+      "fix_strategy": "Map `ESX.ShowNotification` to `QBCore.Functions.Notify` inside staged output.",
+      "problem": "Legacy or non-target API `ESX.ShowNotification` detected.",
+      "type": "mapping"
+    },
+    {
+      "file": "client.lua",
+      "fix_strategy": "Map `exports.ox_target` to `exports['qb-target']` inside staged output.",
+      "problem": "Legacy or non-target API `exports.ox_target` detected.",
+      "type": "mapping"
+    },
+    {
+      "file": "client.lua",
+      "fix_strategy": "Map `ox_target` to `qb-target` inside staged output.",
+      "problem": "Legacy or non-target API `ox_target` detected.",
+      "type": "mapping"
+    },
+    {
+      "file": "fxmanifest.lua",
+      "fix_strategy": "Map ox_target exports/options to qb-target equivalents in staged files.",
+      "problem": "Targeting API usage needs server target-system alignment.",
+      "type": "targeting"
+    },
+    {
+      "file": "fxmanifest.lua",
+      "fix_strategy": "Map `mysql-async` to `oxmysql` inside staged output.",
+      "problem": "Legacy or non-target API `mysql-async` detected.",
+      "type": "mapping"
+    },
+    {
+      "file": "fxmanifest.lua",
+      "fix_strategy": "Map `ox_target` to `qb-target` inside staged output.",
+      "problem": "Legacy or non-target API `ox_target` detected.",
+      "type": "mapping"
+    },
+    {
+      "file": "server.lua",
+      "fix_strategy": "Keep event handlers local to the resource unless a QBCore event mapping is required.",
+      "problem": "Network event registration may need namespace or payload adaptation.",
+      "type": "event"
+    },
+    {
+      "file": "server.lua",
+      "fix_strategy": "Stage mysql-async to oxmysql API changes only; never execute SQL automatically.",
+      "problem": "Database query API or SQL file detected.",
+      "type": "database"
+    },
+    {
+      "file": "server.lua",
+      "fix_strategy": "Map `local ESX = exports['es_extended']:getSharedObject()` to `local QBCore = exports['qb-core']:GetCoreObject()` inside staged output.",
+      "problem": "Legacy or non-target API `local ESX = exports['es_extended']:getSharedObject()` detected.",
+      "type": "mapping"
+    },
+    {
+      "file": "server.lua",
+      "fix_strategy": "Map `exports['es_extended']:getSharedObject()` to `exports['qb-core']:GetCoreObject()` inside staged output.",
+      "problem": "Legacy or non-target API `exports['es_extended']:getSharedObject()` detected.",
+      "type": "mapping"
+    },
+    {
+      "file": "server.lua",
+      "fix_strategy": "Map `ESX.GetPlayerFromId` to `QBCore.Functions.GetPlayer` inside staged output.",
+      "problem": "Legacy or non-target API `ESX.GetPlayerFromId` detected.",
+      "type": "mapping"
+    },
+    {
+      "file": "server.lua",
+      "fix_strategy": "Map `player.identifier` to `player.PlayerData.citizenid` inside staged output.",
+      "problem": "Legacy or non-target API `player.identifier` detected.",
+      "type": "mapping"
+    },
+    {
+      "file": "server.lua",
+      "fix_strategy": "Map `mysql-async` to `oxmysql` inside staged output.",
+      "problem": "Legacy or non-target API `mysql-async` detected.",
+      "type": "mapping"
+    },
+    {
+      "file": "server.lua",
+      "fix_strategy": "Map `MySQL.Async` to `MySQL` inside staged output.",
+      "problem": "Legacy or non-target API `MySQL.Async` detected.",
+      "type": "mapping"
+    }
+  ],
+  "patterns": {
+    "RegisterNetEvent": [
+      "server.lua"
+    ],
+    "database queries": [
+      "server.lua"
+    ],
+    "targeting systems": [
+      "client.lua",
+      "fxmanifest.lua"
+    ]
+  },
+  "recommended_actions": [
+    "Generate staged compatibility patches only under /home/agentzero/agents/staging.",
+    "Convert ESX object/player data calls to QBCore equivalents.",
+    "Replace mysql-async usage with oxmysql-compatible calls.",
+    "Map ox_target usage to qb-target exports/options.",
+    "Wrap every generated code edit with AGENT FIX START and AGENT FIX END comments."
+  ],
+  "risk_level": "high",
+  "target_framework": "QBCore"
+}

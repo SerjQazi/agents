@@ -63,6 +63,8 @@ Return a practical plan with summary, risks, files that would change, backup pla
             risks.insert(1, f"SQL files detected: {', '.join(scan['sql_files'])}")
         return {
             "summary": f"Plan-only Planner Agent task prepared for: {prompt[:160]}",
+            "integration_analysis": scan.get("integration_analysis", self._empty_analysis(scan)),
+            "mapping_rules": scan.get("mapping_rules", {}),
             "risks": risks,
             "files_it_would_change": likely_files,
             "backup_plan": [
@@ -86,3 +88,12 @@ Return a practical plan with summary, risks, files that would change, backup pla
             ],
         }
 
+    def _empty_analysis(self, scan: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "framework_detected": "standalone",
+            "target_framework": "QBCore",
+            "files_scanned": scan.get("files", []),
+            "issues": [],
+            "risk_level": "low",
+            "recommended_actions": ["Review prompt-only task manually before generating staged changes."],
+        }

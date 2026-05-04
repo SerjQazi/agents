@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .config import BuilderConfig
+from .config import PlannerConfig
 
 
 TEXT_EXTS = {".lua", ".js", ".json", ".cfg", ".sql", ".md", ".txt", ".html", ".css", ".xml", ".yml", ".yaml"}
@@ -36,7 +36,7 @@ MARKERS = {
 
 
 class ScriptScanner:
-    def __init__(self, config: BuilderConfig) -> None:
+    def __init__(self, config: PlannerConfig) -> None:
         self.config = config
 
     def resolve_script_path(self, script_path: str | None) -> Path | None:
@@ -167,7 +167,7 @@ class ScriptScanner:
                 {
                     "category": "database",
                     "severity": "high",
-                    "message": "SQL files found. Builder Agent must not run SQL automatically.",
+                    "message": "SQL files found. Planner Agent must not run SQL automatically.",
                     "evidence": {"sql_files": sql_files},
                 }
             )

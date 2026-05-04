@@ -11,7 +11,16 @@ from typing import Any
 
 KNOWN_AGENTS = [
     {"name": "AgentOS Dashboard", "service": "agentos.service", "keywords": ["agentos_agent.app:app", "uvicorn api:app"]},
-    {"name": "Planner Agent", "service": "planner-agent.service", "keywords": ["apps.planner_agent.app:app", "planner_agent.app:app"]},
+    {
+        "name": "Planner Agent",
+        "service": "planner-agent.service",
+        "keywords": ["apps.planner_agent.app:app", "planner_agent.app:app", "apps.builder_agent.app:app", "builder_agent.app:app"],
+    },
+    {
+        "name": "Planner Agent legacy service",
+        "service": "builder-agent.service",
+        "keywords": ["apps.builder_agent.app:app", "builder_agent.app:app"],
+    },
     {"name": "Bubbles bot", "service": "bubbles.service", "keywords": ["bots.bubbles_agent", "bubbles.py", "bubbles"]},
     {"name": "mailman / mail agent", "service": "mailman.service", "keywords": ["bots.mail_agent", "mailman.py", "mail-agent", "mailman"]},
     {"name": "system_agent", "service": "system-agent.service", "keywords": ["system_agent"]},
@@ -22,8 +31,8 @@ KNOWN_AGENTS = [
     {"name": "FiveM server", "service": "fivem.service", "keywords": ["FXServer", "txAdmin"]},
 ]
 
-SERVICE_MATCHES = ("agent", "bubbles", "mail", "ollama", "fivem", "txadmin", "planner")
-PROCESS_MATCHES = ("agent", "bubbles", "mailman", "ollama", "uvicorn", "fivem", "fxserver", "txadmin")
+SERVICE_MATCHES = ("agent", "bubbles", "mail", "ollama", "fivem", "txadmin", "planner", "builder")
+PROCESS_MATCHES = ("agent", "bubbles", "mailman", "ollama", "uvicorn", "fivem", "fxserver", "txadmin", "builder", "planner")
 
 
 def collect_service_inventory() -> dict[str, Any]:

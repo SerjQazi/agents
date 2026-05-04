@@ -1,4 +1,4 @@
-"""Compatibility package for legacy imports from builder_agent.*."""
+"""Compatibility package for imports from planner_agent.*."""
 
 from pathlib import Path
 

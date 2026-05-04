@@ -1,0 +1,81 @@
+--- original/client.lua
++++ staged/files/client.lua
+@@ -1,7 +1,13 @@
+-local ESX = exports['es_extended']:getSharedObject()
++-- AGENT FIX START
++-- Mapped local ESX = exports['es_extended']:getSharedObject() to local QBCore = exports['qb-core']:GetCoreObject().
++-- Mapped ESX.ShowNotification to QBCore.Functions.Notify.
++-- Mapped exports.ox_target to exports['qb-target'].
++-- Mapped ox_target to qb-target.
++-- AGENT FIX END
++local QBCore = exports['qb-core']:GetCoreObject()
+ 
+ CreateThread(function()
+-    exports.ox_target:addBoxZone({
++    exports['qb-target']:addBoxZone({
+         coords = vec3(0.0, 0.0, 72.0),
+         size = vec3(1.5, 1.5, 2.0),
+         rotation = 0.0,
+@@ -11,7 +17,7 @@
+                 icon = 'fa-solid fa-box',
+                 label = 'Open broken stash',
+                 onSelect = function()
+-                    ESX.ShowNotification('This fake resource expects ESX and ox_target.')
++                    QBCore.Functions.Notify('This fake resource expects ESX and qb-target.')
+                     exports.ox_inventory:openInventory('stash', 'test_bad_script')
+                 end
+             }
+--- original/fxmanifest.lua
++++ staged/files/fxmanifest.lua
+@@ -1,3 +1,7 @@
++-- AGENT FIX START
++-- Mapped mysql-async to oxmysql.
++-- Mapped ox_target to qb-target.
++-- AGENT FIX END
+ fx_version 'cerulean'
+ game 'gta5'
+ 
+@@ -11,6 +15,6 @@
+ dependencies {
+     'es_extended',
+     'ox_inventory',
+-    'ox_target',
+-    'mysql-async'
++    'qb-target',
++    'oxmysql'
+ }
+--- original/server.lua
++++ staged/files/server.lua
+@@ -1,8 +1,15 @@
+-local ESX = exports['es_extended']:getSharedObject()
++-- AGENT FIX START
++-- Mapped local ESX = exports['es_extended']:getSharedObject() to local QBCore = exports['qb-core']:GetCoreObject().
++-- Mapped ESX.GetPlayerFromId to QBCore.Functions.GetPlayer.
++-- Mapped player.identifier to player.PlayerData.citizenid.
++-- Mapped mysql-async to oxmysql.
++-- Mapped MySQL.Async to MySQL.
++-- AGENT FIX END
++local QBCore = exports['qb-core']:GetCoreObject()
+ 
+ RegisterNetEvent('test-bad-script:server:takeItem', function()
+     local src = source
+-    local player = ESX.GetPlayerFromId(src)
++    local player = QBCore.Functions.GetPlayer(src)
+ 
+     if not player then
+         return
+@@ -13,11 +20,11 @@
+         exports.ox_inventory:RemoveItem(src, 'lockpick', 1)
+     end
+ 
+-    MySQL.Async.fetchAll(
++    MySQL.fetchAll(
+         'SELECT * FROM users WHERE identifier = @identifier',
+-        { ['@identifier'] = player.identifier },
++        { ['@identifier'] = player.PlayerData.citizenid },
+         function(result)
+-            print(('Fake mysql-async result count: %s'):format(#result))
++            print(('Fake oxmysql result count: %s'):format(#result))
+         end
+     )
+ end)

@@ -36,6 +36,8 @@ class Storage:
                 """
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
                     prompt TEXT NOT NULL,
                     script_path TEXT,
                     model TEXT NOT NULL,
@@ -132,23 +134,35 @@ class Storage:
             self._ensure_column(conn, "tasks", "staging_path", "TEXT")
             self._ensure_column(conn, "tasks", "applied_at", "TEXT")
             self._ensure_column(conn, "tasks", "validation_status", "TEXT")
+            self._ensure_column(conn, "tasks", "title", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "tasks", "description", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "plans", "integration_analysis_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "plans", "mapping_rules_json", "TEXT NOT NULL DEFAULT '{}'")
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
-    def create_task(self, task_id: str, prompt: str, script_path: str | None, model: str) -> None:
+    def create_task(
+        self,
+        task_id: str,
+        prompt: str,
+        script_path: str | None,
+        model: str,
+        title: str,
+        description: str,
+    ) -> None:
         now = utc_now()
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO tasks (
-                    id, prompt, script_path, model, status, approval_status, apply_mode, created_at, updated_at
+                    id, title, description, prompt, script_path, model, status, approval_status, apply_mode, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, 'active', 'pending', 'none', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, 'planning', 'pending', 'none', ?, ?)
                 """,
-                (task_id, prompt, script_path, model, now, now),
+                (task_id, title, description, prompt, script_path, model, now, now),
             )
 
     def update_task(self, task_id: str, status: str, summary: str) -> None:
@@ -199,9 +213,9 @@ class Storage:
                 """
                 INSERT OR REPLACE INTO plans (
                     task_id, summary, risks_json, files_json, backup_plan_json,
-                    patch_plan_json, test_checklist_json, raw_model_response, created_at
+                    patch_plan_json, test_checklist_json, raw_model_response, integration_analysis_json, mapping_rules_json, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -212,6 +226,8 @@ class Storage:
                     json.dumps(plan.get("patch_plan", []), sort_keys=True),
                     json.dumps(plan.get("test_checklist", []), sort_keys=True),
                     raw_model_response,
+                    json.dumps(plan.get("integration_analysis", {}), sort_keys=True),
+                    json.dumps(plan.get("mapping_rules", {}), sort_keys=True),
                     utc_now(),
                 ),
             )
@@ -236,6 +252,8 @@ class Storage:
         data = dict(row)
         for key in ["risks_json", "files_json", "backup_plan_json", "patch_plan_json", "test_checklist_json"]:
             data[key] = json.loads(data[key] or "[]")
+        data["integration_analysis"] = json.loads(data.get("integration_analysis_json") or "{}")
+        data["mapping_rules"] = json.loads(data.get("mapping_rules_json") or "{}")
         return data
 
     def list_for_task(self, table: str, task_id: str) -> list[dict[str, Any]]:
@@ -255,8 +273,8 @@ class Storage:
         now = utc_now()
         with self.connect() as conn:
             conn.execute(
-                "UPDATE tasks SET approval_status = ?, updated_at = ? WHERE id = ?",
-                (decision, now, task_id),
+                "UPDATE tasks SET approval_status = ?, status = CASE WHEN ? = 'approved' THEN 'approved' ELSE status END, updated_at = ? WHERE id = ?",
+                (decision, decision, now, task_id),
             )
             conn.execute(
                 "INSERT INTO approvals (task_id, decision, note, created_at) VALUES (?, ?, ?, ?)",
@@ -297,7 +315,7 @@ class Storage:
             conn.execute(
                 """
                 UPDATE tasks
-                SET apply_mode = ?, staging_path = ?, applied_at = ?, validation_status = ?, updated_at = ?
+                SET apply_mode = ?, staging_path = ?, applied_at = ?, validation_status = ?, status = 'staged', updated_at = ?
                 WHERE id = ?
                 """,
                 (mode, str(staging_path), now, status, now, task_id),
