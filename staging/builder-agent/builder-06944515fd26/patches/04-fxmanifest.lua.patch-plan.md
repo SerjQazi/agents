@@ -1,0 +1,32 @@
+# Review Blockers
+
+- SQL detected. Review only. Live apply blocked.
+- SQL files found. Builder Agent must not run SQL automatically.
+
+Live apply remains disabled. These staged files are for review only.
+
+# Staged Patch Plan: fxmanifest.lua
+
+Task: `builder-06944515fd26`
+Mode: staging_only
+
+This is a controlled staging artifact. It does not modify live FiveM resources.
+
+## Summary
+
+Plan-only Builder Agent task prepared for: Compare the live qb-inventory against incoming/qb-inventory-new and create a safe patch plan. Plan only. Do not edit files. Do not run SQL.
+
+## Proposed Steps
+
+- Keep work in staging first; do not modify live FiveM resources in MVP.
+- Map framework, database, target, and inventory APIs only inside the incoming script or compatibility adapters.
+- Add AGENT FIX START and AGENT FIX END comments around major generated changes in a future approved apply mode.
+- Write a detailed report before asking for apply approval.
+
+## Safety
+
+- Live apply is disabled.
+- SQL execution is blocked.
+- Destructive deletes are blocked.
+- qb-core edits are blocked without separate approval.
+- Shell commands from model output are never executed.

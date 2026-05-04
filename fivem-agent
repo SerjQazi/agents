@@ -16,11 +16,389 @@ Usage:
   fivem-agent suggest SCRIPT_FOLDER
   fivem-agent prepare SCRIPT_FOLDER
   fivem-agent apply SCRIPT_NAME
+  fivem-agent deploy [--dry-run]
   fivem-agent status
 USAGE
 }
 
 command="${1:-}"
+
+repo_status_short() {
+  local repo="$1"
+  git -C "$repo" status --short
+}
+
+repo_has_changes() {
+  local repo="$1"
+  [[ -n "$(repo_status_short "$repo")" ]]
+}
+
+repo_changed_files() {
+  local repo="$1"
+  git -C "$repo" status --short | sed 's/^...//'
+}
+
+repo_changed_existing_files_by_ext() {
+  local repo="$1"
+  local ext="$2"
+  {
+    git -C "$repo" diff --name-only --diff-filter=ACMR HEAD -- "*.$ext"
+    git -C "$repo" ls-files --others --exclude-standard -- "*.$ext"
+  } | sort -u | while IFS= read -r path; do
+    [[ -f "$repo/$path" ]] && printf '%s\n' "$path"
+  done
+}
+
+run_git_diff_check() {
+  local repo="$1"
+  local label="$2"
+  local report="$3"
+  local ok=0
+
+  {
+    printf '\n### %s git diff --check\n\n' "$label"
+    printf '```text\n'
+  } >> "$report"
+  if git -C "$repo" diff --check >> "$report" 2>&1; then
+    printf 'No unstaged whitespace/conflict-marker issues found.\n' >> "$report"
+  else
+    ok=1
+  fi
+  {
+    printf '```\n'
+    printf '\n### %s git diff --cached --check\n\n' "$label"
+    printf '```text\n'
+  } >> "$report"
+  if git -C "$repo" diff --cached --check >> "$report" 2>&1; then
+    printf 'No staged whitespace/conflict-marker issues found.\n' >> "$report"
+  else
+    ok=1
+  fi
+  printf '```\n' >> "$report"
+
+  return "$ok"
+}
+
+run_node_checks() {
+  local repo="$1"
+  local label="$2"
+  local report="$3"
+  local ok=0
+  local files=()
+  local file
+
+  mapfile -t files < <(repo_changed_existing_files_by_ext "$repo" "js")
+  printf '\n### %s changed JavaScript syntax checks\n\n' "$label" >> "$report"
+  if [[ "${#files[@]}" -eq 0 ]]; then
+    printf 'No changed JavaScript files found.\n' >> "$report"
+    return 0
+  fi
+
+  if ! command -v node >/dev/null 2>&1; then
+    printf 'FAIL: node is not installed; cannot syntax check changed JavaScript files.\n' >> "$report"
+    return 1
+  fi
+
+  for file in "${files[@]}"; do
+    {
+      printf '\n#### `%s`\n\n' "$file"
+      printf '```text\n'
+    } >> "$report"
+    if node --check "$repo/$file" >> "$report" 2>&1; then
+      printf 'OK\n' >> "$report"
+    else
+      ok=1
+    fi
+    printf '```\n' >> "$report"
+  done
+
+  return "$ok"
+}
+
+run_lua_checks() {
+  local repo="$1"
+  local label="$2"
+  local report="$3"
+  local ok=0
+  local checker=""
+  local files=()
+  local file
+
+  mapfile -t files < <(repo_changed_existing_files_by_ext "$repo" "lua")
+  printf '\n### %s changed Lua syntax checks\n\n' "$label" >> "$report"
+  if [[ "${#files[@]}" -eq 0 ]]; then
+    printf 'No changed Lua files found.\n' >> "$report"
+    return 0
+  fi
+
+  if command -v luac >/dev/null 2>&1; then
+    checker="luac"
+  elif command -v lua >/dev/null 2>&1; then
+    checker="lua"
+  else
+    printf 'SKIP: neither lua nor luac is installed; changed Lua files were not syntax checked.\n' >> "$report"
+    return 0
+  fi
+
+  for file in "${files[@]}"; do
+    {
+      printf '\n#### `%s`\n\n' "$file"
+      printf '```text\n'
+    } >> "$report"
+    if [[ "$checker" == "luac" ]]; then
+      if luac -p "$repo/$file" >> "$report" 2>&1; then
+        printf 'OK\n' >> "$report"
+      else
+        ok=1
+      fi
+    else
+      if lua -e 'assert(loadfile(arg[1]))' "$repo/$file" >> "$report" 2>&1; then
+        printf 'OK\n' >> "$report"
+      else
+        ok=1
+      fi
+    fi
+    printf '```\n' >> "$report"
+  done
+
+  return "$ok"
+}
+
+generate_commit_message() {
+  local repo="$1"
+  local default_scope="$2"
+  local paths
+  local scope
+
+  paths="$(repo_changed_files "$repo")"
+  scope="$(
+    printf '%s\n' "$paths" \
+      | awk -F/ 'NF {gsub(/^\[[^]]+\]$/, "", $1); print $1}' \
+      | grep -Ev '^(reports|backups|staging|incoming)?$' \
+      | head -n 1
+  )"
+  if [[ -z "$scope" ]]; then
+    scope="$default_scope"
+  fi
+
+  if printf '%s\n' "$paths" | grep -qiE '(^|/)(fix|bug|patch)|bugfix|hotfix'; then
+    printf 'fix(%s): deploy validated changes\n' "$scope"
+  elif printf '%s\n' "$paths" | grep -qE '^reports/'; then
+    printf 'chore(deploy): record server integration report\n'
+  else
+    printf 'feat(%s): deploy validated changes\n' "$scope"
+  fi
+}
+
+commit_and_push_repo() {
+  local repo="$1"
+  local label="$2"
+  local message="$3"
+  local report="$4"
+
+  printf '\n## %s commit and push\n\n' "$label" >> "$report"
+  if ! repo_has_changes "$repo"; then
+    printf 'Nothing to commit.\n' >> "$report"
+    echo "$label: nothing to commit"
+    return 0
+  fi
+
+  printf 'Commit message: `%s`\n\n' "$message" >> "$report"
+  (
+    cd "$repo"
+    git add -A
+    git commit -m "$message"
+    branch="$(git rev-parse --abbrev-ref HEAD)"
+    if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+      git push origin "$branch"
+    else
+      git push -u origin "$branch"
+    fi
+  ) 2>&1 | tee -a "$report"
+}
+
+write_repo_status_section() {
+  local report="$1"
+  local repo="$2"
+  local label="$3"
+
+  {
+    printf '\n## %s git status\n\n' "$label"
+    printf '```text\n'
+    git -C "$repo" status --short
+    printf '```\n'
+    printf '\n### %s changed files\n\n' "$label"
+  } >> "$report"
+
+  if repo_has_changes "$repo"; then
+    repo_changed_files "$repo" | sed 's/^/- /' >> "$report"
+  else
+    printf 'None.\n' >> "$report"
+  fi
+}
+
+cmd_deploy() {
+  local dry_run=0
+  if [[ "$#" -gt 1 ]]; then
+    usage >&2
+    exit 2
+  fi
+  if [[ "${1:-}" == "--dry-run" ]]; then
+    dry_run=1
+  elif [[ "$#" -eq 1 ]]; then
+    usage >&2
+    exit 2
+  fi
+
+  if [[ "$(pwd)" != "$AGENT_REPO" ]]; then
+    cd "$AGENT_REPO"
+  fi
+
+  if [[ ! -d "$SERVER_RESOURCES/.git" ]]; then
+    echo "FiveM resources path is not a git repository: $SERVER_RESOURCES" >&2
+    exit 1
+  fi
+  if [[ ! -d "$AGENT_REPO/.git" ]]; then
+    echo "Agents path is not a git repository: $AGENT_REPO" >&2
+    exit 1
+  fi
+
+  mkdir -p "$REPORTS_DIR"
+  local timestamp today report validation_failed resources_message agents_message
+  local sql_changed qb_core_changed live_qb_core_changed
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  today="$(date +%Y%m%d)"
+  report="$REPORTS_DIR/deploy-$timestamp.md"
+  validation_failed=0
+
+  {
+    printf '# FiveM Deploy Report - %s\n\n' "$timestamp"
+    printf 'Mode: %s\n\n' "$([[ "$dry_run" -eq 1 ]] && printf 'dry-run' || printf 'deploy')"
+    printf 'Agents repo: `%s`\n\n' "$AGENT_REPO"
+    printf 'FiveM resources repo: `%s`\n\n' "$SERVER_RESOURCES"
+    printf 'Safety notes:\n'
+    printf '%s\n' '- SQL was not run.'
+    printf '%s\n' '- FiveM was not restarted.'
+    printf '%s\n' '- No new branches were created.'
+    printf '%s\n' '- Deploy does not edit gameplay scripts or server.cfg.'
+  } > "$report"
+
+  echo "Resources git status:"
+  git -C "$SERVER_RESOURCES" status --short
+  echo
+  echo "Agents git status:"
+  git -C "$AGENT_REPO" status --short
+  echo
+
+  write_repo_status_section "$report" "$SERVER_RESOURCES" "FiveM resources"
+  write_repo_status_section "$report" "$AGENT_REPO" "Agents"
+
+  {
+    printf '\n## Backup folders found for today\n\n'
+    find "$BACKUPS_DIR" -maxdepth 1 -mindepth 1 -type d -name "${today}*" -printf '- %f\n' | sort
+  } >> "$report"
+
+  {
+    printf '\n## SQL files changed\n\n'
+    sql_changed="$(
+      {
+        repo_changed_files "$SERVER_RESOURCES"
+        repo_changed_files "$AGENT_REPO"
+      } | grep -Ei '\.sql$' || true
+    )"
+    if [[ -n "$sql_changed" ]]; then
+      printf '%s\n' "$sql_changed" | sed 's/^/- /'
+      validation_failed=1
+      printf '\nFAIL: SQL files changed. Deploy will not package SQL changes.\n'
+    else
+      printf 'None.\n'
+    fi
+  } >> "$report"
+
+  {
+    printf '\n## qb-core files changed\n\n'
+    qb_core_changed="$(
+      {
+        repo_changed_files "$SERVER_RESOURCES"
+        repo_changed_files "$AGENT_REPO"
+      } | grep -E '(^|/)qb-core(/|$)' || true
+    )"
+    if [[ -n "$qb_core_changed" ]]; then
+      printf '%s\n' "$qb_core_changed" | sed 's/^/- /'
+    else
+      printf 'None.\n'
+    fi
+  } >> "$report"
+
+  live_qb_core_changed="$(repo_changed_files "$SERVER_RESOURCES" | grep -E '^qb-core(/|$)' || true)"
+  if [[ -n "$live_qb_core_changed" ]]; then
+    {
+      printf '\nFAIL: live qb-core files changed in resources repo. Deploy will not package direct qb-core changes.\n'
+    } >> "$report"
+    validation_failed=1
+  fi
+
+  printf '\n## Validation results\n' >> "$report"
+  run_git_diff_check "$SERVER_RESOURCES" "FiveM resources" "$report" || validation_failed=1
+  run_git_diff_check "$AGENT_REPO" "Agents" "$report" || validation_failed=1
+  run_node_checks "$SERVER_RESOURCES" "FiveM resources" "$report" || validation_failed=1
+  run_node_checks "$AGENT_REPO" "Agents" "$report" || validation_failed=1
+  run_lua_checks "$SERVER_RESOURCES" "FiveM resources" "$report" || validation_failed=1
+  run_lua_checks "$AGENT_REPO" "Agents" "$report" || validation_failed=1
+
+  {
+    printf '\n## Rollback notes\n\n'
+    printf '%s\n' '- Use the commit hashes below to identify what was deployed.'
+    printf '%s\n' '- Revert the resources commit first if gameplay behavior needs rollback.'
+    printf '%s\n' '- Revert the agents commit only for report/tooling changes.'
+    printf '%s\n' '- Restore from today backup folders listed above if file-level rollback is needed.'
+    printf '%s\n' '- Restart/reload FiveM manually only after review; deploy does not do this.'
+    printf '\n## Manual in-game test checklist\n\n'
+    printf '%s\n' '- Confirm server boots without console errors.'
+    printf '%s\n' '- Join with a test character.'
+    printf '%s\n' '- Exercise each changed resource path listed above.'
+    printf '%s\n' '- Confirm inventory, money, permissions, and player data are unchanged unless intentionally modified before deploy.'
+    printf '%s\n' '- Check client F8 console for Lua/JS runtime errors.'
+    printf '%s\n' '- Confirm no SQL migration was needed or run.'
+  } >> "$report"
+
+  if [[ "$validation_failed" -ne 0 ]]; then
+    echo "Validation failed. Report: $report" >&2
+    exit 1
+  fi
+
+  resources_message="$(generate_commit_message "$SERVER_RESOURCES" "resources")"
+  agents_message="$(generate_commit_message "$AGENT_REPO" "deploy")"
+
+  {
+    printf '\n## Planned commit messages\n\n'
+    printf '%s\n' "- FiveM resources: \`$resources_message\`"
+    printf '%s\n' "- Agents: \`$agents_message\`"
+  } >> "$report"
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    {
+      printf '\n## Commit hashes after commit\n\n'
+      printf 'Dry run: no commits or pushes were performed.\n'
+    } >> "$report"
+    echo "Dry run complete. Report: $report"
+    echo "No commits or pushes were performed."
+    return 0
+  fi
+
+  commit_and_push_repo "$SERVER_RESOURCES" "FiveM resources" "$resources_message" "$report"
+
+  {
+    printf '\n## Commit hashes after commit\n\n'
+    printf '%s\n' "- FiveM resources: \`$(git -C "$SERVER_RESOURCES" rev-parse HEAD)\`"
+    printf '%s\n' '- Agents: this report is included in the agents deploy commit; the final hash is printed after push.'
+  } >> "$report"
+
+  commit_and_push_repo "$AGENT_REPO" "Agents" "$agents_message" "$report"
+  echo "Agents commit hash: $(git -C "$AGENT_REPO" rev-parse HEAD)"
+
+  echo "Deploy complete. Report: $report"
+}
 
 case "$command" in
   profile)
@@ -192,6 +570,11 @@ case "$command" in
     echo
     echo "FiveM resources repo: $SERVER_RESOURCES"
     git -C "$SERVER_RESOURCES" status
+    ;;
+
+  deploy)
+    shift
+    cmd_deploy "$@"
     ;;
 
   -h|--help|help)

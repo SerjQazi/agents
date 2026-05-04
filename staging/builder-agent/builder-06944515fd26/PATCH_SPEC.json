@@ -1,0 +1,83 @@
+{
+  "created_at": "2026-05-04T00:18:21+00:00",
+  "live_apply": "disabled",
+  "mode": "staging_only",
+  "patches": [
+    {
+      "action": "write",
+      "source_path": "client/main.lua",
+      "target_path": "patches/01-main.lua.patch-plan.md"
+    },
+    {
+      "action": "write",
+      "source_path": "client/visual.lua",
+      "target_path": "patches/02-visual.lua.patch-plan.md"
+    },
+    {
+      "action": "write",
+      "source_path": "config.lua",
+      "target_path": "patches/03-config.lua.patch-plan.md"
+    },
+    {
+      "action": "write",
+      "source_path": "fxmanifest.lua",
+      "target_path": "patches/04-fxmanifest.lua.patch-plan.md"
+    },
+    {
+      "action": "write",
+      "source_path": "html/js/app.js",
+      "target_path": "patches/05-app.js.patch-plan.md"
+    },
+    {
+      "action": "write",
+      "source_path": "html/js/purify.min.js",
+      "target_path": "patches/06-purify.min.js.patch-plan.md"
+    },
+    {
+      "action": "write",
+      "source_path": "server/compat_qb.lua",
+      "target_path": "patches/07-compat_qb.lua.patch-plan.md"
+    },
+    {
+      "action": "write",
+      "source_path": "server/main.lua",
+      "target_path": "patches/08-main.lua.patch-plan.md"
+    },
+    {
+      "action": "write",
+      "source_path": "server/shop_compat.lua",
+      "target_path": "patches/09-shop_compat.lua.patch-plan.md"
+    },
+    {
+      "action": "write",
+      "source_path": "server/visual.lua",
+      "target_path": "patches/10-visual.lua.patch-plan.md"
+    },
+    {
+      "action": "write",
+      "source_path": "shared/qbcore_compat.lua",
+      "target_path": "patches/11-qbcore_compat.lua.patch-plan.md"
+    }
+  ],
+  "review_status": "blocked_review",
+  "safety_warnings": [
+    "SQL detected. Review only. Live apply blocked.",
+    "SQL files found. Builder Agent must not run SQL automatically."
+  ],
+  "source_task": {
+    "applied_at": null,
+    "apply_mode": "none",
+    "approval_status": "approved",
+    "created_at": "2026-05-04T00:17:16+00:00",
+    "id": "builder-06944515fd26",
+    "model": "qwen2.5-coder:7b",
+    "prompt": "Compare the live qb-inventory against incoming/qb-inventory-new and create a safe patch plan. Plan only. Do not edit files. Do not run SQL.",
+    "script_path": "incoming/qb-inventory-new",
+    "staging_path": null,
+    "status": "completed",
+    "summary": "Plan-only Builder Agent task prepared for: Compare the live qb-inventory against incoming/qb-inventory-new and create a safe patch plan. Plan only. Do not edit files. Do not run SQL.",
+    "updated_at": "2026-05-04T00:18:21+00:00",
+    "validation_status": null
+  },
+  "task_id": "builder-06944515fd26"
+}
