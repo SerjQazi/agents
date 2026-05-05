@@ -5,3 +5,5 @@ memory.json
 __pycache__/
 *.pyc
 memory/*.sqlite
+.aider*
+!.aiderignore

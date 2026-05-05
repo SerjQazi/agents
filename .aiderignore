@@ -1,0 +1,51 @@
+# Deny-by-default Aider policy for the fallback coding agent.
+*
+
+# Allowed edit roots.
+!staging/
+!staging/**
+!apps/
+!apps/*/
+!apps/*/**
+!scripts/
+!scripts/**
+
+# Explicit hard blocks, even if copied under allowed trees.
+qb-core/
+qb-core/**
+**/qb-core/
+**/qb-core/**
+core/
+core/**
+agent_core/
+agent_core/**
+planner_agent/
+planner_agent/**
+coding_agent/
+coding_agent/**
+builder_agent/
+builder_agent/**
+incoming/
+incoming/**
+backups/
+backups/**
+reports/
+reports/**
+fivem-server/
+fivem-server/**
+
+# Secrets, generated files, and local Aider state.
+.env
+.env.*
+**/.env
+**/.env.*
+credentials.json
+token.json
+**/credentials.json
+**/token.json
+__pycache__/
+**/__pycache__/**
+*.pyc
+.aider*
+.git/
+.git/**
