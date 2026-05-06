@@ -1,0 +1,37 @@
+#!/bin/bash
+set -euo pipefail
+
+source_file="$2"
+provider="$1"
+timestamp=$(date +"%Y%m%d-%H%M%S")
+reports_dir="/home/agentzero/agents/reports/session-checkpoints"
+lessons_log="/home/agentzero/agents/memory/ai-agents/lessons-learned.md"
+
+if [[ -z "$provider" || -z "$source_file" ]]; then
+  echo "Usage: $0 <provider> <summary-file>"
+  exit 1
+fi
+
+if [[ ! -f "$source_file" ]]; then
+  echo "Error: Summary file not found: $source_file"
+  exit 1
+fi
+
+mkdir -p "$reports_dir"
+summary_filename="${provider}-session-${timestamp}.md"
+destination_file="$reports_dir/$summary_filename"
+
+cp "$source_file" "$destination_file"
+echo "Session summary copied to $destination_file"
+
+summary_title="Session Summary for $provider: $(basename "$source_file")"
+summary_lesson="Review available in reports/session-checkpoints/${summary_filename}"
+
+echo "### $summary_title" >> "$lessons_log"
+echo " - **Date**: $(date +"%Y-%m-%d %H:%M:%S")" >> "$lessons_log"
+echo " - **Provider**: $provider" >> "$lessons_log"
+echo " - **Summary File**: $summary_filename" >> "$lessons_log"
+echo " - **Lesson**: $summary_lesson" >> "$lessons_log"
+echo "" >> "$lessons_log"
+
+echo "Index entry added to $lessons_log"

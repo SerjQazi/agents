@@ -1,0 +1,20 @@
+#!/bin/bash
+cd /home/agentzero/agents || { echo "Failed to change directory to /home/agentzero/agents"; exit 1; }
+
+if [[ "$1" == "--help" ]]; then
+  echo "Launches OpenCode with the openrouter/google/gemini-2.5-flash model."
+  echo "Usage: $(basename "$0") [opencode_args]"
+  exit 0
+fi
+
+if [[ -z "$OPENROUTER_API_KEY" ]]; then
+  echo "Error: OPENROUTER_API_KEY environment variable is not set." >&2
+  echo "Please set it before using OpenRouter models." >&2
+  exit 1
+fi
+
+echo "--- Launching OpenCode with Gemini 2.5 Flash ---"
+echo "Safety Reminder: Work inside /home/agentzero/agents. Do not touch live FiveM resources unless explicitly approved."
+echo "---"
+
+exec opencode -m openrouter/google/gemini-2.5-flash "$@"

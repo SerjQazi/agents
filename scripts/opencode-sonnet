@@ -1,0 +1,20 @@
+#!/bin/bash
+cd /home/agentzero/agents || { echo "Failed to change directory to /home/agentzero/agents"; exit 1; }
+
+if [[ "$1" == "--help" ]]; then
+  echo "Launches OpenCode with the openrouter/anthropic/claude-sonnet-4.5 model."
+  echo "Usage: $(basename "$0") [opencode_args]"
+  exit 0
+fi
+
+if [[ -z "$OPENROUTER_API_KEY" ]]; then
+  echo "Error: OPENROUTER_API_KEY environment variable is not set." >&2
+  echo "Please set it before using OpenRouter models." >&2
+  exit 1
+fi
+
+echo "--- Launching OpenCode with Claude Sonnet 4.5 ---"
+echo "Safety Reminder: Work inside /home/agentzero/agents. Do not touch live FiveM resources unless explicitly approved."
+echo "---"
+
+exec opencode -m openrouter/anthropic/claude-sonnet-4.5 "$@"

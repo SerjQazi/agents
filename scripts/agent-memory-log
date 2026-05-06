@@ -1,0 +1,20 @@
+#!/bin/bash
+set -euo pipefail
+
+log_file="/home/agentzero/agents/memory/ai-agents/lessons-learned.md"
+timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+
+if [[ -z "$1" || -z "$2" ]]; then
+  echo "Usage: $0 "<title>" "<lesson>""
+  exit 1
+fi
+
+title="$1"
+lesson="$2"
+
+echo "### $title" >> "$log_file"
+echo " - **Date**: $timestamp" >> "$log_file"
+echo " - **Lesson**: $lesson" >> "$log_file"
+echo "" >> "$log_file"
+
+echo "Lesson logged to $log_file"

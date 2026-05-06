@@ -45,6 +45,7 @@ def sidebar_html(active: str) -> str:
                 ("ops", "/ops", "Ops Cheat Sheet"),
                 ("commands", "/commands", "Commands"),
                 ("settings", "/settings", "Settings"),
+                ("aimemory", "/aimemory", "AI Memory"),
             ],
         ),
     ]

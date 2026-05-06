@@ -1,0 +1,24 @@
+#!/bin/bash
+
+echo "Recommended OpenCode/OpenRouter Models for AgentOS"
+echo ""
+printf "%-25s %-45s %-60s %s
+" "Command Alias" "Full Model Name" "Use Case" "Cost/Risk"
+printf "%-25s %-45s %-60s %s
+" "-------------" "---------------" "--------" "---------"
+printf "%-25s %-45s %-60s %s
+" "opencode-sonnet" "openrouter/anthropic/claude-sonnet-4.5" "General coding, complex reasoning, UI work" "Medium cost, balanced risk"
+printf "%-25s %-45s %-60s %s
+" "opencode-claude" "openrouter/anthropic/claude-3.7-sonnet" "General coding, task planning, review (Codex fallback)" "Medium cost, balanced risk"
+printf "%-25s %-45s %-60s %s
+" "opencode-haiku" "openrouter/anthropic/claude-3.5-haiku" "Fast, lightweight coding, quick checks, minor fixes" "Low cost, low risk"
+printf "%-25s %-45s %-60s %s
+" "opencode-gemini-pro" "openrouter/google/gemini-2.5-pro" "Strong multi-modal, general coding, complex refactors" "Medium cost, balanced risk"
+printf "%-25s %-45s %-60s %s
+" "opencode-gemini" "openrouter/google/gemini-2.5-flash" "Fast, lightweight generation, UI generation, quick analysis" "Low cost, low risk"
+printf "%-25s %-45s %-60s %s
+" "opencode-gemini-pro-preview" "openrouter/google/gemini-1.5-pro-preview" "Advanced reasoning, large context (if available)" "High cost, high risk"
+printf "%-25s %-45s %-60s %s
+" "opencode-deepseek" "openrouter/deepseek/deepseek-coder-v2" "Dedicated coding (if available)" "Low cost, focused"
+echo ""
+echo "Note: Ensure OPENROUTER_API_KEY is set in your environment for OpenRouter models."
