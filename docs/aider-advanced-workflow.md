@@ -1,6 +1,8 @@
 # Aider Advanced Fallback Workflow
 
-Codex remains the primary coding agent. Use Aider only when Codex is unavailable and the task can be constrained to a small, obvious patch.
+Deprecated for the autonomous script integration workflow. Codex remains the primary coding agent, Gemini is the preferred cloud fallback for bounded reports, and Aider launchers are retained only as historical emergency tooling. Do not use Aider for AgentOS script intake, Planner/Coding/Review automation, or live FiveM resource work.
+
+Use Aider only when Codex and Gemini are unavailable and the task can be constrained to a small, obvious patch in an allowed path.
 
 ## When to Use Codex vs Aider
 

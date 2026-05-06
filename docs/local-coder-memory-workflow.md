@@ -1,11 +1,11 @@
 # Local Coder Memory Workflow
 
-Codex is the primary coding agent. Local Ollama is a fallback path for small, narrow tasks when Codex is offline or unavailable. The fallback works by injecting Codex-written playbooks, safety rules, and examples into a bounded prompt.
+Deprecated as the primary fallback. Codex remains the primary coding agent, Gemini is the preferred cloud fallback, and local Ollama is now emergency-only for tiny offline checks. The memory/playbook architecture stays useful: Codex-written playbooks, safety rules, and examples still define repeatable workflows for bounded report generation.
 
 ## Roles
 
 - Codex writes and updates files in `memory/playbooks`, `memory/rules`, and `memory/examples`.
-- Ollama executes narrow review tasks using one playbook, one target file, and one task string.
+- Ollama executes narrow emergency review tasks using one playbook, one target file, and one task string.
 - Runtime prompts load only the selected playbook, safety rules, local LLM limits, and the truncated target file. Examples stay in memory for future playbook updates.
 - The local model never edits live files directly.
 - The local model never pushes to Git.
@@ -13,7 +13,7 @@ Codex is the primary coding agent. Local Ollama is a fallback path for small, na
 
 ## Script
 
-Use the general task runner when you want a named playbook:
+These commands are retained for offline emergency use, but they are not the recommended fallback on this 4 vCPU / 8GB RAM CPU-only VM. Use the general task runner only when Codex and Gemini are unavailable and the task is small:
 
 ```bash
 /home/agentzero/scripts/coder-task <playbook-name> <file-path> "<task>"
@@ -127,6 +127,8 @@ When a report looks useful, review it manually or ask Codex to inspect it before
 
 On this CPU-only VM, even small `qwen2.5-coder:3b` review prompts can take several minutes. Keep file windows and output caps low when using it interactively.
 
-## Offline Requirement
+## Deprecated Local Fallback
 
 These commands use the local Ollama API directly. They do not require Aider or Codex.
+
+They are intentionally report-only and should not become the main autonomous path again. Prefer AgentOS plus Codex, then Gemini report generation, then local Ollama only as a last resort. Existing `reports/coder-*.md` files are historical diagnostics and can be kept for audit context or removed after review.

@@ -878,12 +878,12 @@ def render_task_detail(config: PlannerConfig, detail: dict[str, Any]) -> str:
     }}
     function sendToCodingAgent(taskId) {{
       var status = document.getElementById("coding-agent-status");
-      status.textContent = "Sending to coding_agent...";
+      status.textContent = "Sending to Coding Agent...";
       fetch("/tasks/" + taskId + "/send-to-coding-agent", {{method: "POST"}})
-        .then(function(response) {{ return response.json().then(function(body) {{ if (!response.ok) throw new Error(body.detail || "coding_agent handoff failed."); return body; }}); }})
+        .then(function(response) {{ return response.json().then(function(body) {{ if (!response.ok) throw new Error(body.detail || "Coding Agent handoff failed."); return body; }}); }})
         .then(function(body) {{
           var preview = body.staging_preview_url ? " Preview: " + body.staging_preview_url : "";
-          status.textContent = "coding_agent task " + body.task_id + " staged." + preview;
+          status.textContent = "Coding Agent task " + body.task_id + " staged." + preview;
         }})
         .catch(function(error) {{ status.textContent = error.message; }});
     }}

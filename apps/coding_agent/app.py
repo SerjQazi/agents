@@ -315,7 +315,7 @@ def daily_digest() -> HTMLResponse:
       <section class="panel"><div class="head"><h2>Daily Coding Digest</h2><span>{_esc(today.isoformat())}</span></div><div class="body summary">Readable timeline of today's staged coding tasks.</div></section>
       {rows}
     """
-    return HTMLResponse(render_layout("Daily Digest", "daily", content, _shared_page_css(), subtitle="Readable timeline of staged coding tasks."))
+    return HTMLResponse(render_layout("Daily Coding Digest", "daily", content, _shared_page_css(), subtitle="Readable timeline of staged coding tasks."))
 
 
 def _scan_requested_path(script_path: str | None) -> list[str]:

@@ -13,7 +13,7 @@ def esc(value: object) -> str:
 
 
 def nav_url(path: str) -> str:
-    return f"{AGENTOS_BASE}{path}"
+    return path
 
 
 def sidebar_html(active: str) -> str:
@@ -24,24 +24,26 @@ def sidebar_html(active: str) -> str:
                 ("dashboard", "/", "Dashboard"),
                 ("control", "/control", "Control Panels"),
                 ("agents", "/agents", "Agents"),
-                ("ops", "/ops", "Ops Cheat Sheet"),
                 ("logs", "/logs", "Logs"),
             ],
         ),
         (
-            "BUILD SYSTEM",
+            "BUILD PIPELINE",
             [
                 ("upload", "/upload", "Upload Pipeline"),
                 ("planner", "/planner", "Planner Agent"),
                 ("coding", "/coding", "Coding Agent"),
                 ("daily", "/reports/daily", "Daily Digest"),
+                ("reviews", "/reviews", "Reviews"),
+                ("staging", "/staging", "Staging"),
             ],
         ),
         (
-            "OPTIONAL",
+            "TOOLS",
             [
-                ("reviews", "/reviews", "Reviews"),
-                ("staging", "/staging", "Staging"),
+                ("ops", "/ops", "Ops Cheat Sheet"),
+                ("commands", "/commands", "Commands"),
+                ("settings", "/settings", "Settings"),
             ],
         ),
     ]
@@ -73,7 +75,7 @@ def layout_css() -> str:
         --ao-blue: #6ecbff;
         --ao-green: #37d67a;
         --ao-danger: #ff6370;
-        --ao-sidebar-width: 292px;
+        --ao-sidebar-width: 272px;
       }
 
       * { box-sizing: border-box; }
@@ -102,7 +104,7 @@ def layout_css() -> str:
         top: 0;
         height: 100vh;
         overflow-y: auto;
-        padding: 22px 15px;
+        padding: 20px 14px;
         border-right: 1px solid rgba(110, 203, 255, 0.16);
         background:
           linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018)),
@@ -127,7 +129,7 @@ def layout_css() -> str:
         width: 38px;
         height: 38px;
         border: 1px solid rgba(0, 212, 255, 0.34);
-        border-radius: 11px;
+        border-radius: 8px;
         background: rgba(0, 212, 255, 0.12);
         color: var(--ao-text);
         box-shadow: 0 0 22px rgba(0, 212, 255, 0.14);
@@ -158,10 +160,10 @@ def layout_css() -> str:
       .ao-nav-link {
         display: flex;
         align-items: center;
-        min-height: 42px;
-        padding: 10px 12px;
+        min-height: 39px;
+        padding: 9px 11px;
         border: 1px solid transparent;
-        border-radius: 11px;
+        border-radius: 8px;
         color: var(--ao-muted);
         text-decoration: none;
         font-size: 14px;

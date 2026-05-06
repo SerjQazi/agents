@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="/home/agentzero/agents"
+PLAYBOOK="$REPO_ROOT/memory/playbooks/fivem-script-integration-checklist.md"
+RULES_DIR="$REPO_ROOT/memory/rules"
+REPORT_DIR="$REPO_ROOT/reports"
+MODEL="${GEMINI_MODEL:-gemini-2.5-flash}"
+API_BASE="${GEMINI_API_BASE:-https://generativelanguage.googleapis.com/v1beta}"
+MAX_TREE_LINES="${GEMINI_TREE_LINES:-180}"
+MAX_FILE_LINES="${GEMINI_FILE_LINES:-180}"
+MAX_KEYWORD_FILES="${GEMINI_KEYWORD_FILES:-12}"
+GEMINI_TIMEOUT="${GEMINI_TIMEOUT_SECONDS:-90}"
+MAX_OUTPUT_TOKENS="${GEMINI_MAX_OUTPUT_TOKENS:-700}"
+
+usage() {
+  echo "Usage: gemini-integration-check <folder>" >&2
+}
+
+missing_key() {
+  cat >&2 <<'EOF'
+GEMINI_API_KEY is not set.
+
+Create a Gemini API key in Google AI Studio, then run:
+
+  export GEMINI_API_KEY="your-api-key"
+  gemini-integration-check incoming/<resource-folder>
+
+No files were changed.
+EOF
+}
+
+relpath() {
+  local path="$1"
+  if [[ "$path" == "$REPO_ROOT/"* ]]; then
+    printf '%s\n' "${path#$REPO_ROOT/}"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+list_matches() {
+  local pattern="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg --files "$resolved_folder" | rg -i "$pattern" | sed "s#^$REPO_ROOT/##" | head -n "$MAX_FILE_LINES" || true
+  else
+    find "$resolved_folder" -type f | grep -Ei "$pattern" | sed "s#^$REPO_ROOT/##" | head -n "$MAX_FILE_LINES" || true
+  fi
+}
+
+keyword_files() {
+  local keyword="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg -l -i -F --glob '*.lua' --glob '*.js' --glob '*.json' --glob '*.cfg' --glob '*.sql' "$keyword" "$resolved_folder" 2>/dev/null \
+      | sed "s#^$REPO_ROOT/##" \
+      | head -n "$MAX_KEYWORD_FILES" || true
+  else
+    find "$resolved_folder" -type f \( -name '*.lua' -o -name '*.js' -o -name '*.json' -o -name '*.cfg' -o -name '*.sql' \) \
+      -exec grep -IilF "$keyword" {} + 2>/dev/null \
+      | sed "s#^$REPO_ROOT/##" \
+      | head -n "$MAX_KEYWORD_FILES" || true
+  fi
+}
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 2
+fi
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  missing_key
+  exit 2
+fi
+
+target_folder="$1"
+if [[ "$target_folder" = /* ]]; then
+  candidate_folder="$target_folder"
+else
+  candidate_folder="$REPO_ROOT/$target_folder"
+fi
+
+if [[ ! -d "$candidate_folder" ]]; then
+  echo "Folder not found: $candidate_folder" >&2
+  exit 1
+fi
+
+resolved_folder="$(cd "$candidate_folder" && pwd -P)"
+case "$resolved_folder" in
+  "$REPO_ROOT"/*) ;;
+  *)
+    echo "Refusing to inspect folder outside $REPO_ROOT: $resolved_folder" >&2
+    echo "Copy or upload the script into incoming/ or staging/ first." >&2
+    exit 1
+    ;;
+esac
+
+mkdir -p "$REPORT_DIR"
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+report_path="$REPORT_DIR/gemini-integration-check-$timestamp.md"
+summary_file="$(mktemp)"
+prompt_file="$(mktemp)"
+gemini_output_file="$(mktemp)"
+trap 'rm -f "$summary_file" "$prompt_file" "$gemini_output_file"' EXIT
+
+total_files="$(find "$resolved_folder" -type f | wc -l | awk '{print $1}')"
+
+{
+  echo "# Folder Summary"
+  echo
+  echo "- Folder: $(relpath "$resolved_folder")"
+  echo "- Total files: $total_files"
+  echo "- Tree line cap: $MAX_TREE_LINES"
+  echo "- File list cap: $MAX_FILE_LINES"
+  echo "- Keyword file cap: $MAX_KEYWORD_FILES"
+  echo
+  echo "## File Tree"
+  find "$resolved_folder" -maxdepth 4 -print | sed "s#^$REPO_ROOT/##" | sort | head -n "$MAX_TREE_LINES"
+  echo
+  echo "## Lua/JS/HTML/CSS/SQL/JSON Files"
+  list_matches '\.(lua|js|html|css|sql|json)$'
+  echo
+  echo "## Manifest Files"
+  list_matches '(^|/)(fxmanifest\.lua|__resource\.lua)$'
+  echo
+  echo "## SQL Files"
+  list_matches '\.sql$'
+  echo
+  echo "## Config Files"
+  list_matches '(^|/)(config[^/]*\.(lua|js|json|cfg)|.*config.*\.(lua|js|json|cfg))$'
+  echo
+  echo "## Client Files"
+  list_matches '(^|/).*client.*\.(lua|js)$'
+  echo
+  echo "## Server Files"
+  list_matches '(^|/).*server.*\.(lua|js)$'
+  echo
+  echo "## Shared Files"
+  list_matches '(^|/).*(shared|locale|config).*\.(lua|js|json)$'
+  echo
+  echo "## Dependency Keywords"
+  for keyword in \
+    'ESX' 'es_extended' 'esx:getSharedObject' 'QBCore' 'qb-core' 'qbx_core' 'qbx_' \
+    'ox_lib' 'ox_inventory' 'qb-inventory' 'qb-target' 'ox_target' \
+    'mysql-async' 'MySQL.Async' 'oxmysql' '@oxmysql' \
+    'RegisterServerEvent' 'RegisterNetEvent' 'CreateCallback' 'RegisterNUICallback'
+  do
+    matches="$(keyword_files "$keyword")"
+    if [[ -n "$matches" ]]; then
+      echo
+      echo "### $keyword"
+      printf '%s\n' "$matches"
+    fi
+  done
+} > "$summary_file"
+
+{
+  echo "# Gemini FiveM Integration Check"
+  echo
+  echo "You are Gemini acting as a secondary cloud fallback. Codex is primary."
+  echo "Use only the folder summary and memory context below. Do not ask for full repository access."
+  echo
+  echo "Hard constraints:"
+  echo "- Do not modify files."
+  echo "- Do not push to Git."
+  echo "- Do not restart services."
+  echo "- Do not run SQL."
+  echo "- Do not modify live FiveM resources directly."
+  echo "- Recommend staging-only next steps."
+  echo
+  echo "Output format:"
+  echo "- Framework/dependency guess"
+  echo "- Files to inspect first"
+  echo "- SQL/config risks"
+  echo "- Staging-only adaptation plan"
+  echo "- Blockers or human approval needed"
+  echo
+  echo "Keep the report short and practical."
+  echo
+  echo "## Playbook"
+  cat "$PLAYBOOK"
+  echo
+  echo "## Safety Rules"
+  cat "$RULES_DIR/safety-rules.md"
+  echo
+  echo "## FiveM Rules"
+  cat "$RULES_DIR/fivem-rules.md"
+  echo
+  cat "$summary_file"
+  echo
+  echo "Write the integration checklist now."
+} > "$prompt_file"
+
+set +e
+python3 - "$MODEL" "$API_BASE" "$GEMINI_TIMEOUT" "$MAX_OUTPUT_TOKENS" "$prompt_file" > "$gemini_output_file" 2>&1 <<'PY'
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+model, api_base, timeout, max_output_tokens, prompt_path = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+api_key = os.environ.get("GEMINI_API_KEY", "")
+if not api_key:
+    print("GEMINI_API_KEY is not set.", file=sys.stderr)
+    sys.exit(2)
+
+with open(prompt_path, "r", encoding="utf-8", errors="replace") as handle:
+    prompt = handle.read()
+
+model_path = model if model.startswith("models/") else f"models/{model}"
+url = f"{api_base.rstrip('/')}/{model_path}:generateContent"
+payload = {
+    "contents": [
+        {
+            "role": "user",
+            "parts": [{"text": prompt}],
+        }
+    ],
+    "generationConfig": {
+        "temperature": 0.1,
+        "maxOutputTokens": max_output_tokens,
+    },
+}
+req = urllib.request.Request(
+    url,
+    data=json.dumps(payload).encode("utf-8"),
+    headers={
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key,
+    },
+    method="POST",
+)
+
+try:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        data = json.loads(response.read().decode("utf-8"))
+except urllib.error.HTTPError as exc:
+    body = exc.read().decode("utf-8", errors="replace")
+    print(f"Gemini request failed with HTTP {exc.code}.")
+    print(body[:1200])
+    sys.exit(1)
+except Exception as exc:
+    print(f"Gemini request failed: {exc}")
+    sys.exit(1)
+
+parts = []
+for candidate in data.get("candidates", []):
+    content = candidate.get("content", {})
+    for part in content.get("parts", []):
+        text = part.get("text")
+        if text:
+            parts.append(text)
+
+if not parts:
+    print("Gemini response did not include text output.")
+    print(json.dumps(data, indent=2)[:1200])
+    sys.exit(1)
+
+print("\n".join(parts).strip())
+PY
+gemini_status=$?
+set -e
+
+{
+  echo "# gemini-integration-check report"
+  echo
+  echo "- Timestamp: $timestamp"
+  echo "- Model: $MODEL"
+  echo "- Folder: $resolved_folder"
+  echo "- Total files: $total_files"
+  echo "- Tree line cap: $MAX_TREE_LINES"
+  echo "- File list cap: $MAX_FILE_LINES"
+  echo "- Keyword file cap: $MAX_KEYWORD_FILES"
+  echo "- Max output tokens: $MAX_OUTPUT_TOKENS"
+  echo
+  echo "## Shell Summary"
+  echo
+  cat "$summary_file"
+  echo
+  echo "## Gemini Output"
+  echo
+  if [[ "$gemini_status" -ne 0 ]]; then
+    echo "Gemini request failed. No files were changed."
+    echo
+  fi
+  cat "$gemini_output_file"
+} > "$report_path"
+
+echo "$report_path"
+exit "$gemini_status"

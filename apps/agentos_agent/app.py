@@ -269,6 +269,7 @@ AGENT_REGISTRY = [
         "service_name": "builder-agent",
         "process_keywords": ["apps.builder_agent.app:app", "uvicorn builder_agent.app:app"],
         "url": "/planner",
+        "direct_service_url": "http://100.68.10.125:8010",
         "path": "/home/agentzero/agents/apps/builder_agent",
         "description": "Plan-only FiveM script analysis, staging previews, validation, and compatibility reports.",
         "icon": "🛠️",
@@ -281,6 +282,7 @@ AGENT_REGISTRY = [
         "service_name": "coding-agent",
         "process_keywords": ["apps.coding_agent.app:app", "uvicorn coding_agent.app:app"],
         "url": "/coding",
+        "direct_service_url": "http://100.68.10.125:8020",
         "path": "/home/agentzero/agents/apps/coding_agent",
         "description": "Local coding planning and repo-context helper.",
         "icon": "💻",
@@ -394,6 +396,8 @@ AGENT_GROUP_ORDER = [
 
 
 def url_is_reachable(url: str, timeout: float = 0.5) -> bool:
+    if url.startswith("/"):
+        return True
     match = re.match(r"^https?://([^/:]+):(\d+)", url)
     if not match:
         return False
@@ -476,7 +480,7 @@ def detect_agent_entry(agent: dict[str, Any]) -> dict[str, Any]:
     badges = list(dict.fromkeys(badges))
 
     if url:
-        suggested_action = "Open dashboard" if url_reachable else "Check service or use local host access."
+        suggested_action = "Open AgentOS page" if url.startswith("/") or url_reachable else "Check service or use local host access."
     elif agent_type == "cli":
         suggested_action = f"Run from shell: {path}"
     elif agent_type == "planned":
@@ -4304,451 +4308,311 @@ def app_sidebar(active: str) -> str:
     return sidebar_html(active)
 
 
-def app_view_html(title: str, active: str, content: str, script: str = "") -> str:
-    return """
-    <!doctype html>
-    <html lang="en">
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>""" + title + """</title>
-        <style>
-          :root {
-            color-scheme: dark;
-            --bg: #050914;
-            --panel: rgba(12, 21, 37, 0.74);
-            --border: rgba(125, 211, 252, 0.2);
-            --border-strong: rgba(125, 211, 252, 0.42);
-            --text: #eef7ff;
-            --muted: #a8b7cc;
-            --soft: #6f8098;
-            --cyan: #00d4ff;
-            --blue: #6ecbff;
-            --green: #37d67a;
-            --danger: #ff6370;
-          }
+def app_view_html(title: str, active: str, content: str, script: str = "", subtitle: str = "") -> str:
+    extra_css = """
+      :root {
+        --bg: var(--ao-bg);
+        --panel: var(--ao-panel);
+        --border: var(--ao-border);
+        --border-strong: var(--ao-border-strong);
+        --text: var(--ao-text);
+        --muted: var(--ao-muted);
+        --soft: var(--ao-soft);
+        --cyan: var(--ao-cyan);
+        --blue: var(--ao-blue);
+        --green: var(--ao-green);
+        --danger: var(--ao-danger);
+      }
 
-          * { box-sizing: border-box; }
+      button,
+      input,
+      select,
+      textarea { font: inherit; }
 
-          body {
-            margin: 0;
-            min-height: 100vh;
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background:
-              radial-gradient(circle at 12% 8%, rgba(64, 224, 208, 0.17), transparent 31%),
-              radial-gradient(circle at 88% 4%, rgba(106, 167, 255, 0.18), transparent 30%),
-              linear-gradient(145deg, #050914 0%, #08111f 52%, #0d1728 100%);
-            color: var(--text);
-          }
+      .glass,
+      .command-card,
+      .logs-panel,
+      .agent-panel,
+      .index-card,
+      .empty-state {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--ao-border);
+        border-radius: 8px;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.025)),
+          var(--ao-panel);
+        box-shadow: 0 14px 36px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+        backdrop-filter: blur(18px);
+      }
 
-          button,
-          input { font: inherit; }
+      .command-card,
+      .logs-panel,
+      .agent-panel,
+      .index-card,
+      .empty-state {
+        margin-bottom: 14px;
+        padding: 16px;
+      }
 
-          .app-shell {
-            display: grid;
-            grid-template-columns: var(--ao-sidebar-width, 292px) minmax(0, 1fr);
-            min-height: 100vh;
-          }
+      .card-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 14px;
+        color: var(--ao-muted);
+        font-size: 13px;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
 
-          .sidebar {
-            position: sticky;
-            top: 0;
-            height: 100vh;
-            padding: 18px 12px;
-            border-right: 1px solid rgba(110, 203, 255, 0.16);
-            background:
-              linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018)),
-              rgba(5, 9, 20, 0.76);
-            box-shadow: 12px 0 36px rgba(0, 0, 0, 0.18);
-            backdrop-filter: blur(18px);
-          }
+      .icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border: 1px solid rgba(125, 211, 252, 0.24);
+        border-radius: 8px;
+        background: rgba(96, 165, 250, 0.11);
+        color: #9bdcff;
+        flex: 0 0 auto;
+      }
 
-          .brand {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 8px 10px 18px;
-            color: var(--text);
-            font-size: 18px;
-            font-weight: 600;
-          }
+      .icon svg {
+        width: 16px;
+        height: 16px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.9;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
 
-          .brand-mark {
-            display: inline-grid;
-            place-items: center;
-            width: 34px;
-            height: 34px;
-            border: 1px solid rgba(0, 212, 255, 0.34);
-            border-radius: 10px;
-            background: rgba(0, 212, 255, 0.12);
-            box-shadow: 0 0 22px rgba(0, 212, 255, 0.14);
-          }
+      .button,
+      .command-card a.button,
+      .registry-actions a,
+      .index-actions a,
+      .agent-actions a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 38px;
+        border: 1px solid rgba(0, 212, 255, 0.34);
+        border-radius: 8px;
+        padding: 8px 12px;
+        background: rgba(16, 36, 58, 0.9);
+        color: var(--ao-text);
+        cursor: pointer;
+        font-weight: 800;
+        text-decoration: none;
+        overflow-wrap: anywhere;
+      }
 
-          .side-nav {
-            display: grid;
-            gap: 5px;
-          }
+      .button:hover,
+      .registry-actions a:hover,
+      .index-actions a:hover,
+      .agent-actions a:hover {
+        background: rgba(22, 52, 83, 0.95);
+        text-decoration: none;
+      }
 
-          .nav-item {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            min-height: 40px;
-            padding: 9px 10px;
-            border: 1px solid transparent;
-            border-radius: 10px;
-            color: var(--muted);
-            text-decoration: none;
-            font-size: 14px;
-            font-weight: 450;
-          }
+      .button.secondary,
+      .registry-actions a.secondary,
+      .index-actions a.secondary,
+      .agent-actions a.secondary {
+        border-color: rgba(110, 203, 255, 0.22);
+        background: rgba(2, 6, 23, 0.34);
+        color: var(--ao-muted);
+      }
 
-          .nav-item svg {
-            width: 17px;
-            height: 17px;
-            fill: none;
-            stroke: currentColor;
-            stroke-width: 1.9;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-          }
+      .command-form {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+      }
 
-          .nav-item.active,
-          .nav-item:hover {
-            border-color: rgba(0, 212, 255, 0.24);
-            background: rgba(0, 212, 255, 0.09);
-            color: var(--text);
-          }
+      .command-input {
+        width: 100%;
+        min-height: 52px;
+        border: 1px solid rgba(110, 203, 255, 0.2);
+        border-radius: 8px;
+        padding: 0 14px;
+        background: rgba(2, 6, 23, 0.48);
+        color: var(--ao-text);
+        outline: none;
+      }
 
-          .sidebar-section {
-            margin-top: 14px;
-            border-top: 1px solid rgba(110, 203, 255, 0.14);
-            padding-top: 12px;
-          }
+      .command-output,
+      .examples {
+        margin-top: 12px;
+        padding: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.14);
+        border-radius: 8px;
+        background: rgba(2, 6, 23, 0.36);
+        color: var(--ao-muted);
+        font-size: 13px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
 
-          .sidebar-section summary {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-            list-style: none;
-            cursor: pointer;
-            padding: 0 10px 8px;
-            color: var(--soft);
-            font-size: 11px;
-            font-weight: 800;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-          }
+      .log-stream {
+        display: grid;
+        gap: 8px;
+        max-height: calc(100vh - 185px);
+        overflow: auto;
+        padding: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.13);
+        border-radius: 8px;
+        background: rgba(2, 6, 23, 0.34);
+        color: var(--ao-muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.55;
+      }
 
-          .sidebar-section summary a {
-            color: var(--blue);
-            font-size: 10px;
-            letter-spacing: 0;
-            text-decoration: none;
-            text-transform: none;
-          }
+      .log-line {
+        display: grid;
+        grid-template-columns: 96px 150px 86px minmax(0, 1fr);
+        gap: 12px;
+        align-items: baseline;
+      }
 
-          .sidebar-section summary::-webkit-details-marker { display: none; }
+      .log-time { color: var(--ao-soft); }
+      .log-source { color: var(--ao-blue); }
+      .log-level { color: var(--ao-soft); font-weight: 700; }
+      .log-line.warning .log-level,
+      .log-line.warning .log-message { color: #facc15; }
+      .log-line.error .log-level,
+      .log-line.error .log-message { color: var(--ao-danger); }
 
-          .agent-links {
-            display: grid;
-            gap: 12px;
-            max-height: 58vh;
-            overflow: auto;
-            padding-right: 3px;
-          }
+      .agent-grid,
+      .index-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
 
-          .agent-group {
-            display: grid;
-            gap: 7px;
-          }
+      .agent-panel h2,
+      .index-card h2,
+      .empty-state h2 {
+        margin: 0 0 7px;
+        font-size: 18px;
+        letter-spacing: 0;
+      }
 
-          .agent-group-title {
-            padding: 0 3px;
-            color: var(--soft);
-            font-size: 10px;
-            font-weight: 850;
-            letter-spacing: 0.06em;
-            text-transform: uppercase;
-          }
+      .agent-panel p,
+      .index-card p,
+      .empty-state p {
+        margin: 0;
+        color: var(--ao-muted);
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+      }
 
-          .agent-link {
-            display: grid;
-            grid-template-columns: auto minmax(0, 1fr);
-            gap: 7px;
-            align-items: center;
-            min-height: 44px;
-            border: 1px solid rgba(125, 211, 252, 0.16);
-            border-radius: 10px;
-            padding: 8px 10px;
-            color: var(--muted);
-            background: rgba(2, 6, 23, 0.18);
-            text-decoration: none;
-          }
+      .agent-actions,
+      .index-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 9px;
+        margin-top: 14px;
+      }
 
-          .agent-link:hover {
-            border-color: rgba(0, 212, 255, 0.28);
-            background: rgba(0, 212, 255, 0.08);
-            color: var(--text);
-          }
+      .agent-status {
+        justify-self: start;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 999px;
+        padding: 3px 8px;
+        color: var(--ao-soft);
+        font-size: 10px;
+        font-weight: 850;
+        line-height: 1.2;
+      }
 
-          .agent-link-icon {
-            font-size: 16px;
-            line-height: 1;
-          }
+      .agent-status.online {
+        border-color: rgba(55, 214, 122, 0.32);
+        color: var(--ao-green);
+        background: rgba(21, 128, 61, 0.12);
+      }
 
-          .agent-link-main {
-            display: grid;
-            gap: 2px;
-            min-width: 0;
-          }
+      .agent-status.local-only,
+      .agent-status.cli,
+      .agent-status.no-ui {
+        border-color: rgba(125, 211, 252, 0.28);
+        color: var(--ao-blue);
+        background: rgba(14, 165, 233, 0.1);
+      }
 
-          .agent-link-name {
-            color: var(--text);
-            font-size: 12px;
-            font-weight: 700;
-          }
+      .agent-status.offline,
+      .agent-status.service-missing {
+        border-color: rgba(255, 99, 112, 0.3);
+        color: var(--ao-danger);
+        background: rgba(127, 29, 29, 0.12);
+      }
 
-          .agent-link-url {
-            overflow: hidden;
-            color: var(--soft);
-            font-size: 9px;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-          }
+      .safety-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 14px;
+      }
 
-          .agent-link-badges {
-            grid-column: 1 / -1;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 4px;
-          }
+      .status-row {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 10px;
+        align-items: start;
+        border: 1px solid rgba(125, 211, 252, 0.16);
+        border-radius: 8px;
+        padding: 10px;
+        background: rgba(2, 6, 23, 0.28);
+      }
 
-          .agent-status {
-            justify-self: start;
-            border: 1px solid rgba(148, 163, 184, 0.18);
-            border-radius: 999px;
-            padding: 2px 7px;
-            color: var(--soft);
-            font-size: 10px;
-            font-weight: 800;
-          }
+      .status-row > span {
+        width: 12px;
+        height: 12px;
+        margin-top: 4px;
+        border-radius: 999px;
+        background: var(--ao-green);
+        box-shadow: 0 0 14px rgba(55, 214, 122, 0.28);
+      }
 
-          .agent-status.online {
-            border-color: rgba(55, 214, 122, 0.32);
-            color: var(--green);
-            background: rgba(21, 128, 61, 0.12);
-          }
+      .status-row.warn > span {
+        background: #fbbf24;
+        box-shadow: 0 0 14px rgba(251, 191, 36, 0.22);
+      }
 
-          .agent-status.local-only,
-          .agent-status.cli,
-          .agent-status.no-ui {
-            border-color: rgba(125, 211, 252, 0.28);
-            color: var(--blue);
-            background: rgba(14, 165, 233, 0.1);
-          }
+      .status-row strong {
+        display: block;
+        color: var(--ao-text);
+        font-size: 13px;
+      }
 
-          .agent-status.offline,
-          .agent-status.service-missing {
-            border-color: rgba(255, 99, 112, 0.3);
-            color: var(--danger);
-            background: rgba(127, 29, 29, 0.12);
-          }
+      .status-row small {
+        display: block;
+        margin-top: 2px;
+        color: var(--ao-muted);
+        line-height: 1.4;
+      }
 
-          .shell {
-            width: min(1240px, 100%);
-            margin: 0 auto;
-            padding: 22px;
-            min-width: 0;
-          }
+      .subtle-id {
+        color: var(--ao-soft);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
 
-          .glass {
-            position: relative;
-            overflow: hidden;
-            border: 1px solid var(--border);
-            border-radius: 17px;
-            background:
-              linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.025)),
-              var(--panel);
-            box-shadow: 0 14px 36px rgba(0, 0, 0, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.07);
-            backdrop-filter: blur(18px);
-          }
-
-          .command-card,
-          .logs-panel {
-            margin-bottom: 14px;
-            padding: 16px;
-          }
-
-          .card-header {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-bottom: 14px;
-            color: var(--muted);
-            font-size: 13px;
-            font-weight: 600;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-          }
-
-          .icon {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 28px;
-            height: 28px;
-            border: 1px solid rgba(125, 211, 252, 0.24);
-            border-radius: 8px;
-            background: rgba(96, 165, 250, 0.11);
-            color: #9bdcff;
-            flex: 0 0 auto;
-          }
-
-          .icon svg {
-            width: 16px;
-            height: 16px;
-            fill: none;
-            stroke: currentColor;
-            stroke-width: 1.9;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-          }
-
-          .command-form {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
-            gap: 10px;
-            align-items: center;
-          }
-
-          .command-input {
-            width: 100%;
-            min-height: 52px;
-            border: 1px solid rgba(110, 203, 255, 0.2);
-            border-radius: 12px;
-            padding: 0 14px;
-            background: rgba(2, 6, 23, 0.48);
-            color: var(--text);
-            outline: none;
-          }
-
-          .button {
-            min-height: 44px;
-            border: 1px solid rgba(0, 212, 255, 0.38);
-            border-radius: 12px;
-            padding: 0 16px;
-            background:
-              linear-gradient(135deg, rgba(0, 212, 255, 0.28), rgba(255, 79, 216, 0.18)),
-              rgba(2, 6, 23, 0.52);
-            color: var(--text);
-            cursor: pointer;
-            font-weight: 550;
-            box-shadow: 0 0 20px rgba(0, 212, 255, 0.11);
-          }
-
-          .button.secondary {
-            min-height: 34px;
-            padding: 0 12px;
-            border-color: rgba(110, 203, 255, 0.22);
-            background: rgba(2, 6, 23, 0.34);
-            color: var(--muted);
-            font-size: 13px;
-          }
-
-          .command-output,
-          .examples {
-            margin-top: 12px;
-            padding: 12px;
-            border: 1px solid rgba(148, 163, 184, 0.14);
-            border-radius: 12px;
-            background: rgba(2, 6, 23, 0.36);
-            color: var(--muted);
-            font-size: 13px;
-            line-height: 1.45;
-            white-space: pre-wrap;
-          }
-
-          .log-stream {
-            display: grid;
-            gap: 8px;
-            max-height: calc(100vh - 145px);
-            overflow: auto;
-            padding: 12px;
-            border: 1px solid rgba(148, 163, 184, 0.13);
-            border-radius: 12px;
-            background: rgba(2, 6, 23, 0.34);
-            color: var(--muted);
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-            font-size: 12px;
-            line-height: 1.55;
-          }
-
-          .log-line {
-            display: grid;
-            grid-template-columns: 96px 150px 86px 1fr;
-            gap: 12px;
-            align-items: baseline;
-          }
-
-          .log-time { color: var(--soft); }
-          .log-source { color: var(--blue); }
-          .log-level { color: var(--soft); font-weight: 700; }
-          .log-line.warning .log-level,
-          .log-line.warning .log-message { color: #facc15; }
-          .log-line.error .log-level,
-          .log-line.error .log-message { color: var(--danger); }
-
-          @media (max-width: 860px) {
-            .app-shell { grid-template-columns: 1fr; }
-            .sidebar {
-              position: sticky;
-              top: 0;
-              z-index: 9;
-              display: flex;
-              align-items: center;
-              gap: 10px;
-              height: auto;
-              padding: 10px;
-              overflow-x: auto;
-              border-right: 0;
-              border-bottom: 1px solid rgba(110, 203, 255, 0.16);
-            }
-            .brand { padding: 0 8px 0 0; white-space: nowrap; }
-            .side-nav { display: flex; gap: 6px; }
-            .nav-item { white-space: nowrap; }
-            .sidebar-section {
-              flex: 0 0 auto;
-              margin-top: 0;
-              border-top: 0;
-              padding-top: 0;
-            }
-            .sidebar-section summary { padding: 9px 8px; }
-            .agent-links { display: flex; gap: 10px; max-height: none; overflow: visible; }
-            .agent-group { display: flex; align-items: stretch; gap: 6px; }
-            .agent-group-title { align-self: center; white-space: nowrap; }
-            .agent-link { min-width: 196px; }
-          }
-
-          @media (max-width: 520px) {
-            .command-form,
-            .log-line { grid-template-columns: 1fr; }
-            .shell { padding: 16px; }
-          }
-        </style>
-      </head>
-      <body>
-        <div class="app-shell">
-          """ + app_sidebar(active) + """
-          <main class="shell">
-            """ + content + """
-          </main>
-        </div>
-        """ + script + """
-      </body>
-    </html>
+      @media (max-width: 900px) {
+        .agent-grid,
+        .index-grid,
+        .safety-grid,
+        .command-form,
+        .log-line { grid-template-columns: 1fr; }
+      }
     """
+    return render_layout(title, active, content, extra_css=extra_css, script=script, subtitle=subtitle)
 
 
 @app.get("/commands", response_class=HTMLResponse)
@@ -5580,10 +5444,15 @@ def agents_page() -> str:
     for agent in agents:
         target = agent.get("url") or agent.get("path") or "No path"
         action = agent.get("suggested_action", "")
-        open_link = ""
+        action_links = []
         if agent.get("url"):
             target_attrs = ' target="_blank" rel="noopener noreferrer"' if str(agent["url"]).startswith(("http://", "https://")) else ""
-            open_link = f'<a class="button secondary" href="{esc(agent["url"])}"{target_attrs}>Open</a>'
+            action_links.append(f'<a class="button" href="{esc(agent["url"])}"{target_attrs}>Open AgentOS page</a>')
+        if agent.get("direct_service_url"):
+            action_links.append(
+                f'<a class="button secondary" href="{esc(agent["direct_service_url"])}" target="_blank" rel="noopener noreferrer">Open direct service</a>'
+            )
+        open_link = "".join(action_links)
         cards.append(
             f"""
             <article class="registry-card glass">
@@ -5600,6 +5469,7 @@ def agents_page() -> str:
                 <div><dt>Status</dt><dd>{esc(agent.get("status", ""))}</dd></div>
                 <div><dt>Service</dt><dd>{esc(agent.get("service_name") or "no service")}</dd></div>
                 <div><dt>Path / URL</dt><dd>{esc(target)}</dd></div>
+                {"<div><dt>Direct service</dt><dd>" + esc(agent.get("direct_service_url", "")) + "</dd></div>" if agent.get("direct_service_url") else ""}
                 <div><dt>Suggested action</dt><dd>{esc(action)}</dd></div>
               </dl>
               <div class="registry-actions">{open_link}</div>
@@ -5752,11 +5622,265 @@ def _response_body_text(response: HTMLResponse) -> str:
     return response.body.decode("utf-8") if isinstance(response.body, bytes) else str(response.body)
 
 
+def _agent_by_display_name(name: str) -> dict[str, Any] | None:
+    for agent in agent_registry_snapshot():
+        if str(agent.get("display_name", "")) == name:
+            return agent
+    return None
+
+
+def _status_badge(label: str, ok: bool, detail: str = "") -> str:
+    class_name = "ok" if ok else "warn"
+    detail_html = f"<small>{esc(detail)}</small>" if detail else ""
+    return f'<div class="status-row {class_name}"><span></span><div><strong>{esc(label)}</strong>{detail_html}</div></div>'
+
+
+def _agent_status_card(agent: dict[str, Any] | None, label: str) -> str:
+    if not agent:
+        return _status_badge(f"{label} reachable", False, "Agent registry entry not found.")
+    status = str(agent.get("status", "unknown"))
+    ok = status == "online"
+    service = str(agent.get("service_state", "unknown"))
+    detail = f"{status.title()} · service: {service}"
+    return _status_badge(f"{label} reachable", ok, detail)
+
+
+def _direct_service_button(agent: dict[str, Any] | None, label: str) -> str:
+    if not agent or not agent.get("direct_service_url"):
+        return ""
+    return (
+        f'<a class="button secondary" href="{esc(agent["direct_service_url"])}" '
+        f'target="_blank" rel="noopener noreferrer">Open direct {esc(label)} service</a>'
+    )
+
+
+def _format_timestamp(value: object) -> str:
+    if not value:
+        return "Unknown time"
+    raw = str(value)
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    return dt.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _recent_planner_tasks_html(limit: int = 5) -> str:
+    try:
+        from apps.planner_agent import app as planner_app
+
+        tasks = planner_app.storage.list_recent("tasks", limit)
+    except Exception as error:
+        return f"""
+          <section class="empty-state">
+            <h2>Planner tasks unavailable</h2>
+            <p>{esc(error)}</p>
+          </section>
+        """
+    if not tasks:
+        return """
+          <section class="empty-state">
+            <h2>No Planner tasks yet</h2>
+            <p>Upload a script to generate a compatibility plan.</p>
+            <div class="index-actions"><a class="button" href="/upload">Open Upload Pipeline</a></div>
+          </section>
+        """
+    cards = []
+    for task in tasks:
+        task_id = str(task.get("id", ""))
+        title = task.get("title") or task.get("prompt") or task_id
+        status = task.get("status") or "unknown"
+        created = _format_timestamp(task.get("created_at") or task.get("updated_at"))
+        cards.append(
+            f"""
+            <article class="index-card">
+              <h2>{esc(title)}</h2>
+              <p>{esc(status)} · {esc(created)}</p>
+              <p class="subtle-id">{esc(task_id)}</p>
+              <div class="index-actions">
+                <a class="button" href="/tasks/{esc(task_id)}/view">View task</a>
+                <a class="button secondary" href="/reports/{esc(task_id)}/view">View report</a>
+              </div>
+            </article>
+            """
+        )
+    return f'<section class="index-grid" aria-label="Recent Planner tasks">{"".join(cards)}</section>'
+
+
+def _review_entries() -> list[dict[str, Any]]:
+    reviews_root = BASE_DIR / "reports" / "reviews"
+    entries: list[dict[str, Any]] = []
+    if not reviews_root.is_dir():
+        return entries
+    for path in sorted(reviews_root.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        task_id = str(data.get("task_id") or path.stem)
+        if not task_id:
+            continue
+        entries.append(
+            {
+                "task_id": task_id,
+                "task_name": data.get("task_name") or task_id,
+                "summary": data.get("summary") or data.get("notes") or "Review report saved.",
+                "status": data.get("status") or "warning",
+                "created_at": data.get("created_at") or datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
+            }
+        )
+    return entries
+
+
+def _review_index_html() -> str:
+    reviews = _review_entries()
+    if not reviews:
+        return """
+          <section class="empty-state">
+            <h2>No reviews yet</h2>
+            <p>No reviews yet. Upload a script or run a coding task to generate one.</p>
+            <div class="index-actions">
+              <a class="button" href="/upload">Open Upload Pipeline</a>
+              <a class="button secondary" href="/reports/daily">Open Daily Coding Digest</a>
+            </div>
+          </section>
+        """
+    cards = []
+    for review in reviews:
+        task_id = str(review["task_id"])
+        cards.append(
+            f"""
+            <article class="index-card">
+              <h2>{esc(review["task_name"])}</h2>
+              <p>{esc(review["summary"])}</p>
+              <p class="subtle-id">{esc(task_id)} · {esc(_format_timestamp(review["created_at"]))} · {esc(str(review["status"]).title())}</p>
+              <div class="index-actions">
+                <a class="button" href="/review/{esc(task_id)}">Open review</a>
+                <a class="button secondary" href="/reports/daily">Daily Coding Digest</a>
+              </div>
+            </article>
+            """
+        )
+    return f'<section class="index-grid" aria-label="Review reports">{"".join(cards)}</section>'
+
+
+def _staging_entries() -> list[dict[str, Any]]:
+    staging_root = BASE_DIR / "staging"
+    entries: list[dict[str, Any]] = []
+    if not staging_root.is_dir():
+        return entries
+    for path in sorted((item for item in staging_root.iterdir() if item.is_dir()), key=lambda item: item.stat().st_mtime, reverse=True):
+        task_id = path.name
+        supported = task_id.startswith("coding-")
+        summary_path = path / "STAGING_SUMMARY.json"
+        summary = "Staging folder ready for review."
+        status = "staged"
+        if summary_path.is_file():
+            try:
+                data = json.loads(summary_path.read_text(encoding="utf-8"))
+                summary = str(data.get("summary") or summary)
+                status = str(data.get("status") or status)
+            except (OSError, json.JSONDecodeError):
+                summary = "Staging summary could not be read."
+                status = "needs review"
+        entries.append(
+            {
+                "task_id": task_id,
+                "path": path,
+                "summary": summary,
+                "status": status,
+                "supported": supported,
+                "updated_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
+            }
+        )
+    return entries
+
+
+def _staging_index_html() -> str:
+    entries = _staging_entries()
+    if not entries:
+        return """
+          <section class="empty-state">
+            <h2>No staging folders yet</h2>
+            <p>No staging folders are available. Upload a script or run a coding task to create staging output.</p>
+            <div class="index-actions">
+              <a class="button" href="/upload">Open Upload Pipeline</a>
+              <a class="button secondary" href="/reviews">Open Reviews</a>
+            </div>
+          </section>
+        """
+    cards = []
+    for entry in entries:
+        task_id = str(entry["task_id"])
+        primary_action = (
+            f'<a class="button" href="/staging/{esc(task_id)}">Open staging preview</a>'
+            if entry["supported"]
+            else '<span class="subtle-id">Preview route not available for this staging folder.</span>'
+        )
+        cards.append(
+            f"""
+            <article class="index-card">
+              <h2>{esc(task_id)}</h2>
+              <p>{esc(entry["summary"])}</p>
+              <p class="subtle-id">{esc(str(entry["path"]))} · {esc(str(entry["status"]).title())} · {esc(_format_timestamp(entry["updated_at"]))}</p>
+              <div class="index-actions">
+                {primary_action}
+                <a class="button secondary" href="/reviews">Open Reviews</a>
+              </div>
+            </article>
+            """
+        )
+    return f'<section class="index-grid" aria-label="Staging folders">{"".join(cards)}</section>'
+
+
+def _upload_safety_checklist_html() -> str:
+    planner_agent = _agent_by_display_name("Planner Agent")
+    coding_agent = _agent_by_display_name("Coding Agent")
+    rows = [
+        _status_badge("AgentOS online", True, "Dashboard route is serving this page."),
+        _agent_status_card(planner_agent, "Planner Agent"),
+        _agent_status_card(coding_agent, "Coding Agent"),
+        _status_badge("Staging-only mode active", True, "Pipeline writes incoming, reports, and staging artifacts only."),
+        _status_badge("Live FiveM resources will not be modified", True, "No live apply, SQL, Git push, or restart is part of upload."),
+    ]
+    return f"""
+      <section class="safety-checklist" aria-label="Pre-upload safety checklist">
+        <div class="safety-head">
+          <div>
+            <h2>Pre-upload safety</h2>
+            <p>Upload testing stays inside AgentOS staging until reviewed.</p>
+          </div>
+          <span class="safety-pill">Staging only</span>
+        </div>
+        <div class="safety-grid">{"".join(rows)}</div>
+      </section>
+    """
+
+
 @app.get("/planner", response_class=HTMLResponse)
 def planner_page() -> str:
-    from apps.planner_agent import app as planner_app
-
-    return _response_body_text(planner_app.dashboard())
+    planner_agent = _agent_by_display_name("Planner Agent")
+    content = f"""
+      <section class="agent-panel">
+        <h2>Planner Agent</h2>
+        <p>Planner Agent reads incoming FiveM scripts, identifies framework and dependency risks, and writes a staging-only plan before any coding work starts.</p>
+        <div class="safety-grid">
+          {_agent_status_card(planner_agent, "Planner Agent")}
+          {_status_badge("Plan-only mode", True, "No SQL, live resource edits, Git push, or service restart.")}
+        </div>
+        <div class="agent-actions">
+          <a class="button" href="/upload">Open Upload Pipeline</a>
+          <a class="button secondary" href="/reports/daily">Daily Coding Digest</a>
+          {_direct_service_button(planner_agent, "Planner")}
+        </div>
+      </section>
+      <section class="agent-panel">
+        <h2>Recent Planner tasks</h2>
+        <p>Open a task to review its plan, findings, report links, and staging-only controls.</p>
+      </section>
+      {_recent_planner_tasks_html()}
+    """
+    return app_view_html("Planner Agent", "planner", content, subtitle="Plan incoming scripts before staged coding work.")
 
 
 @app.get("/tasks/{task_id}/view", response_class=HTMLResponse)
@@ -5848,9 +5972,38 @@ def planner_report_view(task_id: str):
 
 @app.get("/coding", response_class=HTMLResponse)
 def coding_page() -> str:
-    from apps.coding_agent import app as coding_app
-
-    return _response_body_text(coding_app.home())
+    coding_agent = _agent_by_display_name("Coding Agent")
+    review_count = len(_review_entries())
+    staging_count = len(_staging_entries())
+    content = f"""
+      <section class="agent-panel">
+        <h2>Coding Agent</h2>
+        <p>Coding Agent turns approved Planner context into staged patch suggestions and human-readable reviews. It does not apply changes to live FiveM resources.</p>
+        <div class="safety-grid">
+          {_agent_status_card(coding_agent, "Coding Agent")}
+          {_status_badge("Staging-only output", True, "Generated files stay under the agents staging and reports folders.")}
+        </div>
+        <div class="agent-actions">
+          <a class="button" href="/reports/daily">Open Daily Coding Digest</a>
+          <a class="button secondary" href="/reviews">Reviews</a>
+          <a class="button secondary" href="/staging">Staging</a>
+          {_direct_service_button(coding_agent, "Coding")}
+        </div>
+      </section>
+      <section class="agent-grid">
+        <article class="agent-panel">
+          <h2>{review_count} review report(s)</h2>
+          <p>Readable safety reviews generated from staged Coding Agent output.</p>
+          <div class="agent-actions"><a class="button" href="/reviews">Open Reviews</a></div>
+        </article>
+        <article class="agent-panel">
+          <h2>{staging_count} staging folder(s)</h2>
+          <p>Staged output folders waiting for manual or Codex review.</p>
+          <div class="agent-actions"><a class="button" href="/staging">Open Staging</a></div>
+        </article>
+      </section>
+    """
+    return app_view_html("Coding Agent", "coding", content, subtitle="Staged code suggestions and review output.")
 
 
 @app.get("/reports/daily", response_class=HTMLResponse)
@@ -5869,14 +6022,18 @@ def coding_review_page(task_id: str) -> str:
 
 @app.get("/reviews", response_class=HTMLResponse)
 def reviews_index_page() -> str:
-    content = """
-      <section class="command-card glass">
-        <div class="card-header">Reviews</div>
-        <p>Open a specific review from a staging preview or the daily digest.</p>
-        <p><a class="button secondary" href="/reports/daily">Open Daily Digest</a></p>
+    content = f"""
+      <section class="agent-panel">
+        <h2>Reviews</h2>
+        <p>Human-readable reports from Coding Agent staging output. Review these before manually applying any script changes.</p>
+        <div class="agent-actions">
+          <a class="button" href="/reports/daily">Open Daily Coding Digest</a>
+          <a class="button secondary" href="/upload">Open Upload Pipeline</a>
+        </div>
       </section>
+      {_review_index_html()}
     """
-    return app_view_html("Reviews", "reviews", content)
+    return app_view_html("Reviews", "reviews", content, subtitle="Review staged coding output before applying anything.")
 
 
 @app.get("/staging/{task_id}", response_class=HTMLResponse)
@@ -5888,18 +6045,24 @@ def coding_staging_page(task_id: str) -> str:
 
 @app.get("/staging", response_class=HTMLResponse)
 def staging_index_page() -> str:
-    content = """
-      <section class="command-card glass">
-        <div class="card-header">Staging</div>
-        <p>Open a specific staging preview from Coding Agent output or the daily digest.</p>
+    content = f"""
+      <section class="agent-panel">
+        <h2>Staging</h2>
+        <p>Staging folders are review-only workspace outputs. Live FiveM resources are not modified from this page.</p>
+        <div class="agent-actions">
+          <a class="button" href="/upload">Open Upload Pipeline</a>
+          <a class="button secondary" href="/reviews">Open Reviews</a>
+        </div>
       </section>
+      {_staging_index_html()}
     """
-    return app_view_html("Staging", "staging", content)
+    return app_view_html("Staging", "staging", content, subtitle="Staging-only script output.")
 
 
 @app.get("/upload", response_class=HTMLResponse)
 def upload_page() -> str:
-    content = """
+    content = f"""
+      {_upload_safety_checklist_html()}
       <section class="upload-card">
         <div class="upload-head">
           <div>
@@ -5925,7 +6088,7 @@ def upload_page() -> str:
       <section class="progress-card">
         <div class="step" data-step="uploaded"><span></span><div><strong>Uploaded</strong><p>Files saved under incoming.</p></div></div>
         <div class="step" data-step="planning"><span></span><div><strong>Planning</strong><p>Planner Agent analyzes the script.</p></div></div>
-        <div class="step" data-step="coding"><span></span><div><strong>Coding</strong><p>Coding Agent creates staged changes only.</p></div></div>
+        <div class="step" data-step="coding"><span></span><div><strong>Coding Agent</strong><p>Coding Agent creates staged changes only.</p></div></div>
         <div class="step" data-step="reviewing"><span></span><div><strong>Review</strong><p>Human-readable review is generated.</p></div></div>
         <div class="step" data-step="done"><span></span><div><strong>Done</strong><p>Plan, staging, and review links are ready.</p></div></div>
       </section>
@@ -6016,9 +6179,26 @@ def upload_pipeline_status(task_id: str) -> dict[str, Any]:
 
 def _upload_page_css() -> str:
     return """
+      .safety-checklist{
+        border:1px solid var(--ao-border);
+        border-radius:8px;
+        background:var(--ao-panel);
+        box-shadow:0 18px 42px rgba(0,0,0,.22);
+        margin-bottom:18px;
+        overflow:hidden;
+      }
+      .safety-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;padding:18px;border-bottom:1px solid var(--ao-border)}
+      .safety-head h2{margin:0 0 6px;font-size:19px}
+      .safety-head p{margin:0;color:var(--ao-muted);line-height:1.5}
+      .safety-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:16px}
+      .status-row{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:start;border:1px solid rgba(125,211,252,.16);border-radius:8px;padding:10px;background:rgba(2,6,23,.28)}
+      .status-row>span{width:12px;height:12px;margin-top:4px;border-radius:999px;background:#37d67a;box-shadow:0 0 14px rgba(55,214,122,.28)}
+      .status-row.warn>span{background:#fbbf24;box-shadow:0 0 14px rgba(251,191,36,.22)}
+      .status-row strong{display:block;color:var(--ao-text);font-size:13px}
+      .status-row small{display:block;margin-top:2px;color:var(--ao-muted);line-height:1.4}
       .upload-card,.progress-card,.result-card{
         border:1px solid var(--ao-border);
-        border-radius:12px;
+        border-radius:8px;
         background:var(--ao-panel);
         box-shadow:0 18px 42px rgba(0,0,0,.22);
         margin-bottom:18px;
@@ -6029,7 +6209,7 @@ def _upload_page_css() -> str:
       .upload-head p{margin:0;color:var(--ao-muted);line-height:1.5}
       .safety-pill{white-space:nowrap;border:1px solid rgba(94,234,212,.35);border-radius:999px;color:#5eead4;background:rgba(20,184,166,.1);padding:6px 10px;font-size:12px;font-weight:800}
       .upload-form{padding:18px}
-      .drop-zone{min-height:220px;border:2px dashed rgba(125,211,252,.35);border-radius:12px;background:rgba(5,12,24,.5);display:grid;place-items:center;text-align:center;gap:8px;padding:24px;color:var(--ao-muted);cursor:pointer;transition:border-color .16s,background .16s}
+      .drop-zone{min-height:220px;border:2px dashed rgba(125,211,252,.35);border-radius:8px;background:rgba(5,12,24,.5);display:grid;place-items:center;text-align:center;gap:8px;padding:24px;color:var(--ao-muted);cursor:pointer;transition:border-color .16s,background .16s}
       .drop-zone strong{display:block;color:var(--ao-text);font-size:19px}
       .drop-zone.dragging{border-color:#5eead4;background:rgba(20,184,166,.12)}
       .drop-icon{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;border:1px solid rgba(125,211,252,.35);color:#9fdcff;font-size:26px;font-weight:300;margin:auto}
@@ -6040,7 +6220,7 @@ def _upload_page_css() -> str:
       .primary-button:disabled{opacity:.55;cursor:not-allowed}
       .file-list{margin-top:14px;color:var(--ao-muted);line-height:1.55;overflow-wrap:anywhere}
       .progress-card{padding:16px;display:grid;gap:10px}
-      .step{display:flex;gap:12px;align-items:flex-start;border:1px solid rgba(125,211,252,.14);border-radius:10px;padding:12px;background:rgba(5,12,24,.35)}
+      .step{display:flex;gap:12px;align-items:flex-start;border:1px solid rgba(125,211,252,.14);border-radius:8px;padding:12px;background:rgba(5,12,24,.35)}
       .step span{width:24px;height:24px;border-radius:50%;border:1px solid rgba(125,211,252,.35);display:grid;place-items:center;color:var(--ao-muted);flex:0 0 auto}
       .step span::after{content:"";width:8px;height:8px;border-radius:50%;background:rgba(125,211,252,.35)}
       .step p{margin:3px 0 0;color:var(--ao-muted)}
@@ -6054,7 +6234,7 @@ def _upload_page_css() -> str:
       .result-card h2{margin:0 0 8px}
       .result-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
       .hidden{display:none}
-      @media (max-width: 700px){.upload-head{display:block}.safety-pill{display:inline-flex;margin-top:12px}.picker-row>*{width:100%;justify-content:center}}
+      @media (max-width: 700px){.upload-head,.safety-head{display:block}.safety-pill{display:inline-flex;margin-top:12px}.picker-row>*{width:100%;justify-content:center}.safety-grid{grid-template-columns:1fr}}
     """
 
 
@@ -6133,6 +6313,7 @@ def _upload_page_script() -> str:
                 <a href="${body.plan_url || "#"}">View Plan</a>
                 <a href="${body.staging_url || "#"}">View Staging</a>
                 <a href="${body.review_url || "#"}">View Review</a>
+                <a href="/reports/daily">Open Daily Digest</a>
               </div>
             `;
           } catch (error) {
