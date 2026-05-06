@@ -2,6 +2,7 @@
 
 import html
 import json
+import os
 import re
 import shutil
 import socket
@@ -10,9 +11,10 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -31,6 +33,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 GIT_HELPER = BASE_DIR / "scripts" / "git_helper.sh"
 BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9/_\.-]+$")
 DANGEROUS_MESSAGE_CHARS = re.compile(r"[;&|$`<>\"'\\\n\r]")
+SAFE_ITEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,120}$")
 
 
 class CommandRequest(BaseModel):
@@ -44,6 +47,11 @@ class CommandApprovalRequest(BaseModel):
 
 class SelfHealApprovalRequest(BaseModel):
     action: str
+
+
+class AITaskRequest(BaseModel):
+    instruction: str
+    provider: str = "auto"
 
 
 @app.on_event("startup")
@@ -4604,6 +4612,68 @@ def app_view_html(title: str, active: str, content: str, script: str = "", subti
         overflow-wrap: anywhere;
       }
 
+      .card-title-row {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 7px;
+      }
+
+      .card-title-row h2 {
+        margin: 0;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 999px;
+        padding: 3px 8px;
+        color: var(--ao-muted);
+        background: rgba(15, 23, 42, 0.28);
+        font-size: 11px;
+        font-weight: 850;
+        white-space: nowrap;
+      }
+
+      .status-pill.ok {
+        border-color: rgba(55, 214, 122, 0.32);
+        color: var(--ao-green);
+        background: rgba(21, 128, 61, 0.12);
+      }
+
+      .status-pill.warn {
+        border-color: rgba(251, 191, 36, 0.34);
+        color: #fbbf24;
+        background: rgba(146, 64, 14, 0.12);
+      }
+
+      .status-pill.danger {
+        border-color: rgba(255, 99, 112, 0.34);
+        color: var(--ao-danger);
+        background: rgba(127, 29, 29, 0.12);
+      }
+
+      .report-view pre,
+      .file-list-panel {
+        max-height: 58vh;
+        overflow: auto;
+        border: 1px solid rgba(148, 163, 184, 0.14);
+        border-radius: 8px;
+        padding: 12px;
+        background: rgba(2, 6, 23, 0.36);
+        color: var(--ao-muted);
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .file-list-panel {
+        margin: 0;
+        line-height: 1.7;
+      }
+
       @media (max-width: 900px) {
         .agent-grid,
         .index-grid,
@@ -5665,6 +5735,260 @@ def _format_timestamp(value: object) -> str:
     return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 
+def _safe_named_item(value: str, label: str = "item") -> str:
+    if not SAFE_ITEM_RE.fullmatch(value):
+        raise HTTPException(status_code=400, detail=f"Invalid {label}.")
+    return value
+
+
+def _relative_to_base(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(BASE_DIR.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _safe_workspace_file(relative_path: str, root_name: str) -> Path:
+    root = (BASE_DIR / root_name).resolve()
+    candidate = (BASE_DIR / relative_path).resolve()
+    if root not in candidate.parents and candidate != root:
+        raise HTTPException(status_code=400, detail=f"Path must stay under {root_name}/.")
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="File not found.")
+    return candidate
+
+
+def _badge_class(text: str) -> str:
+    lowered = text.lower()
+    if any(word in lowered for word in ["fail", "error", "blocked", "critical", "high risk"]):
+        return "danger"
+    if any(word in lowered for word in ["warn", "risk", "review", "manual", "sql"]):
+        return "warn"
+    if any(word in lowered for word in ["ready", "done", "staged", "ok", "complete"]):
+        return "ok"
+    return "neutral"
+
+
+def _status_pill(label: object) -> str:
+    text = str(label or "unknown")
+    return f'<span class="status-pill {_badge_class(text)}">{esc(text)}</span>'
+
+
+def _read_text_preview(path: Path, limit: int = 60000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    if len(text) > limit:
+        return text[:limit] + "\n\n[Report truncated in UI.]"
+    return text
+
+
+def _report_entries(limit: int = 80) -> list[dict[str, Any]]:
+    reports_root = BASE_DIR / "reports"
+    if not reports_root.is_dir():
+        return []
+    files = [
+        path
+        for path in reports_root.rglob("*")
+        if path.is_file() and path.suffix.lower() in {".md", ".json", ".txt", ".log"}
+    ]
+    entries: list[dict[str, Any]] = []
+    for path in sorted(files, key=lambda item: item.stat().st_mtime, reverse=True)[:limit]:
+        rel = _relative_to_base(path)
+        text = ""
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")[:4000]
+        except OSError:
+            pass
+        status = "ready"
+        if any(token in text.lower() for token in ["failed", "error", "blocked"]):
+            status = "needs review"
+        elif any(token in text.lower() for token in ["risk", "sql", "manual approval"]):
+            status = "review"
+        linked_staging = ""
+        match = re.search(r"\b(coding-[A-Za-z0-9]+|upload-[A-Za-z0-9]+|planner-[A-Za-z0-9]+)\b", path.name + "\n" + text)
+        if match:
+            candidate = BASE_DIR / "staging" / match.group(1)
+            if candidate.is_dir():
+                linked_staging = f"/staging/{match.group(1)}"
+        entries.append(
+            {
+                "name": path.name,
+                "path": rel,
+                "folder": path.parent.relative_to(reports_root).as_posix() if path.parent != reports_root else "reports",
+                "status": status,
+                "size": path.stat().st_size,
+                "updated_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
+                "view_url": f"/reports/view?path={quote(rel)}",
+                "linked_staging": linked_staging,
+            }
+        )
+    return entries
+
+
+def _incoming_entries(limit: int = 40) -> list[dict[str, Any]]:
+    incoming_root = BASE_DIR / "incoming"
+    if not incoming_root.is_dir():
+        return []
+    entries: list[dict[str, Any]] = []
+    for path in sorted(incoming_root.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True)[:limit]:
+        file_count = sum(1 for _ in path.rglob("*") if _.is_file()) if path.is_dir() else 1
+        entries.append(
+            {
+                "name": path.name,
+                "path": _relative_to_base(path),
+                "kind": "folder" if path.is_dir() else "file",
+                "file_count": file_count,
+                "updated_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
+            }
+        )
+    return entries
+
+
+def _upload_jobs(limit: int = 30) -> list[dict[str, Any]]:
+    root = BASE_DIR / "reports" / "upload-pipeline"
+    if not root.is_dir():
+        return []
+    jobs: list[dict[str, Any]] = []
+    for path in sorted(root.glob("upload-*.json"), key=lambda item: item.stat().st_mtime, reverse=True)[:limit]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        data["tracker_path"] = _relative_to_base(path)
+        data["updated_at"] = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+        jobs.append(data)
+    return jobs
+
+
+def _recent_reports_html(limit: int = 12) -> str:
+    reports = _report_entries(limit)
+    if not reports:
+        return """
+          <section class="empty-state">
+            <h2>No reports yet</h2>
+            <p>Run an upload, review, or explicit AI check to generate a report.</p>
+          </section>
+        """
+    cards = []
+    for report in reports:
+        staging_link = (
+            f'<a class="button secondary" href="{esc(report["linked_staging"])}">Related staging</a>'
+            if report.get("linked_staging")
+            else ""
+        )
+        cards.append(
+            f"""
+            <article class="index-card report-card">
+              <div class="card-title-row"><h2>{esc(report["name"])}</h2>{_status_pill(report["status"])}</div>
+              <p>{esc(report["folder"])} · {esc(_format_timestamp(report["updated_at"]))} · {esc(report["size"])} bytes</p>
+              <p class="subtle-id">{esc(report["path"])}</p>
+              <div class="index-actions">
+                <a class="button" href="{esc(report["view_url"])}">Open report</a>
+                {staging_link}
+              </div>
+            </article>
+            """
+        )
+    return f'<section class="index-grid" aria-label="Recent reports">{"".join(cards)}</section>'
+
+
+def _recent_upload_jobs_html(limit: int = 8) -> str:
+    jobs = _upload_jobs(limit)
+    if not jobs:
+        return """
+          <section class="empty-state">
+            <h2>No uploads yet</h2>
+            <p>Drop a script ZIP or folder above to start the staging-only pipeline.</p>
+          </section>
+        """
+    cards = []
+    for job in jobs:
+        task_id = str(job.get("task_id", ""))
+        incoming_path = str(job.get("incoming_path") or "")
+        actions = []
+        if job.get("plan_url"):
+            actions.append(f'<a class="button" href="{esc(job["plan_url"])}">Plan</a>')
+        if job.get("staging_url"):
+            actions.append(f'<a class="button secondary" href="{esc(job["staging_url"])}">Staging</a>')
+        if job.get("review_url"):
+            actions.append(f'<a class="button secondary" href="{esc(job["review_url"])}">Review</a>')
+        actions.append(f'<button class="button secondary ai-check-button" type="button" data-path="{esc(incoming_path)}">Run AI Integration Check</button>')
+        cards.append(
+            f"""
+            <article class="index-card upload-job-card">
+              <div class="card-title-row"><h2>{esc(task_id)}</h2>{_status_pill(job.get("status"))}</div>
+              <p>{esc(len(job.get("files", [])))} file(s) · {esc(_format_timestamp(job.get("updated_at")))}</p>
+              <p class="subtle-id">{esc(incoming_path or job.get("tracker_path", ""))}</p>
+              <div class="index-actions">{"".join(actions)}</div>
+            </article>
+            """
+        )
+    return f'<section class="index-grid" aria-label="Recent upload jobs">{"".join(cards)}</section>'
+
+
+def _incoming_index_html(limit: int = 8) -> str:
+    entries = _incoming_entries(limit)
+    if not entries:
+        return """
+          <section class="empty-state">
+            <h2>No incoming scripts</h2>
+            <p>Uploaded raw scripts will appear here before they are planned, staged, and reviewed.</p>
+          </section>
+        """
+    cards = []
+    for entry in entries:
+        cards.append(
+            f"""
+            <article class="index-card">
+              <div class="card-title-row"><h2>{esc(entry["name"])}</h2>{_status_pill(entry["kind"])}</div>
+              <p>{esc(entry["file_count"])} file(s) · {esc(_format_timestamp(entry["updated_at"]))}</p>
+              <p class="subtle-id">{esc(entry["path"])}</p>
+              <div class="index-actions">
+                <button class="button secondary ai-check-button" type="button" data-path="{esc(str(BASE_DIR / entry["path"]))}">Run AI Integration Check</button>
+              </div>
+            </article>
+            """
+        )
+    return f'<section class="index-grid" aria-label="Incoming scripts">{"".join(cards)}</section>'
+
+
+def _generic_staging_preview_html(task_id: str) -> str:
+    task_id = _safe_named_item(task_id, "staging task id")
+    staging_root = (BASE_DIR / "staging").resolve()
+    path = (staging_root / task_id).resolve()
+    if staging_root not in path.parents or not path.is_dir():
+        raise HTTPException(status_code=404, detail="Staging folder not found.")
+    files = sorted((item for item in path.rglob("*") if item.is_file()), key=lambda item: item.as_posix())[:80]
+    file_rows = "".join(f"<li><code>{esc(item.relative_to(path).as_posix())}</code></li>" for item in files) or "<li>No files found.</li>"
+    preview_parts = []
+    for name in ["STAGING_SUMMARY.json", "PATCH_NOTES.md", "DIFF_PREVIEW.patch", "ROLLBACK_NOTES.md"]:
+        candidate = path / name
+        if candidate.is_file():
+            preview_parts.append(f"<h3>{esc(name)}</h3><pre>{esc(_read_text_preview(candidate, 30000))}</pre>")
+    preview = "".join(preview_parts) or "<p>No standard staging summary files were found.</p>"
+    content = f"""
+      <section class="agent-panel">
+        <h2>{esc(task_id)}</h2>
+        <p>Read-only staging folder preview. Live FiveM resources are not modified from this page.</p>
+        <div class="agent-actions">
+          <a class="button" href="/staging">Back to Staging</a>
+          <a class="button secondary" href="/reviews">Reviews</a>
+        </div>
+      </section>
+      <section class="agent-panel">
+        <h2>Files</h2>
+        <ul class="file-list-panel">{file_rows}</ul>
+      </section>
+      <section class="agent-panel report-view">
+        <h2>Staging Notes</h2>
+        {preview}
+      </section>
+    """
+    return app_view_html("Staging Preview", "staging", content, subtitle=task_id)
+
+
 def _recent_planner_tasks_html(limit: int = 5) -> str:
     try:
         from apps.planner_agent import app as planner_app
@@ -5831,6 +6155,116 @@ def _staging_index_html() -> str:
             """
         )
     return f'<section class="index-grid" aria-label="Staging folders">{"".join(cards)}</section>'
+
+
+@app.get("/guide", response_class=HTMLResponse)
+def system_guide_page() -> str:
+    tabs = [
+        ("Dashboard", "Home base for system health, pipeline counts, and next actions."),
+        ("Control Panels", "Operational command surfaces and status cards."),
+        ("Agents", "Registry of AgentOS services, CLIs, and fallback providers."),
+        ("Logs", "Recent operational log stream for debugging."),
+        ("Upload Pipeline", "Upload raw FiveM scripts into incoming and start staging-only processing."),
+        ("Planner Agent", "Inspects framework, dependencies, SQL, config, client, server, and shared files."),
+        ("Coding Agent", "Creates staging-only output and human-readable review material."),
+        ("Daily Digest", "Daily coding and review summary."),
+        ("Reviews", "Readable risk reports before any human-approved apply step."),
+        ("Staging", "Safe generated output folders for inspection and manual testing."),
+        ("Ops Cheat Sheet", "Known safe operational commands and reminders."),
+        ("Commands", "Interactive command center with approval gates."),
+        ("Settings", "Reserved for future UI preferences and integration settings."),
+    ]
+    tab_cards = "".join(
+        f"<article class='guide-card'><h3>{esc(name)}</h3><p>{esc(text)}</p></article>"
+        for name, text in tabs
+    )
+    provider_cards = "".join(
+        [
+            "<article class='guide-card'><h3>Codex</h3><p>Primary coding agent for repo changes, validation, and playbook updates.</p></article>",
+            "<article class='guide-card'><h3>Gemini</h3><p>Cloud fallback for bounded reports and planning when Codex is unavailable.</p></article>",
+            "<article class='guide-card'><h3>OpenCode</h3><p>Multi-model fallback coding agent for explicit, scoped tasks using API providers.</p></article>",
+            "<article class='guide-card'><h3>Local coder / Ollama</h3><p>Emergency-only and deprecated for normal work on this CPU-only VM.</p></article>",
+        ]
+    )
+    content = f"""
+      <style>
+        .guide-hero,
+        .guide-panel {{
+          border: 1px solid var(--ao-border);
+          border-radius: 8px;
+          background: var(--ao-panel);
+          box-shadow: 0 18px 42px rgba(0,0,0,.22);
+          margin-bottom: 16px;
+          padding: 18px;
+        }}
+        .guide-hero h2,
+        .guide-panel h2 {{ margin: 0 0 8px; }}
+        .guide-hero p,
+        .guide-panel p {{ color: var(--ao-muted); line-height: 1.55; }}
+        .workflow-line {{
+          display: grid;
+          grid-template-columns: repeat(7, minmax(0, 1fr));
+          gap: 8px;
+          margin-top: 14px;
+        }}
+        .workflow-node {{
+          min-height: 82px;
+          border: 1px solid rgba(125,211,252,.18);
+          border-radius: 8px;
+          padding: 10px;
+          background: rgba(2,6,23,.32);
+        }}
+        .workflow-node strong {{ display: block; color: var(--ao-text); font-size: 13px; }}
+        .workflow-node span {{ display: block; margin-top: 5px; color: var(--ao-muted); font-size: 12px; line-height: 1.35; }}
+        .guide-grid {{
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 12px;
+        }}
+        .guide-card {{
+          border: 1px solid rgba(125,211,252,.16);
+          border-radius: 8px;
+          padding: 12px;
+          background: rgba(2,6,23,.28);
+        }}
+        .guide-card h3 {{ margin: 0 0 6px; font-size: 15px; }}
+        .guide-card p {{ margin: 0; font-size: 13px; }}
+        @media (max-width: 1100px) {{
+          .workflow-line,
+          .guide-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+        }}
+        @media (max-width: 700px) {{
+          .workflow-line,
+          .guide-grid {{ grid-template-columns: 1fr; }}
+        }}
+      </style>
+      <section class="guide-hero">
+        <h2>AgentOS Script Integration Control Center</h2>
+        <p>AgentOS keeps third-party FiveM script intake safe: raw uploads stay in incoming, generated output stays in staging, reports explain risk, and live server actions remain human-approved.</p>
+        <div class="workflow-line" aria-label="Script integration workflow">
+          <div class="workflow-node"><strong>incoming</strong><span>Raw upload saved.</span></div>
+          <div class="workflow-node"><strong>planner</strong><span>Framework and dependency scan.</span></div>
+          <div class="workflow-node"><strong>coding</strong><span>Staging-only adaptation.</span></div>
+          <div class="workflow-node"><strong>staging</strong><span>Generated files reviewed.</span></div>
+          <div class="workflow-node"><strong>review</strong><span>Risks and next action.</span></div>
+          <div class="workflow-node"><strong>human approval</strong><span>No automatic live apply.</span></div>
+          <div class="workflow-node"><strong>test + git</strong><span>Only after approval.</span></div>
+        </div>
+      </section>
+      <section class="guide-panel">
+        <h2>Sidebar tabs</h2>
+        <div class="guide-grid">{tab_cards}</div>
+      </section>
+      <section class="guide-panel">
+        <h2>AI provider roles</h2>
+        <div class="guide-grid">{provider_cards}</div>
+      </section>
+      <section class="guide-panel">
+        <h2>Safety model</h2>
+        <p>No page in AgentOS should edit live FiveM resources, touch qb-core, run SQL, restart services, or push Git automatically. Apply/deploy actions stay disabled or human-approved until testing is intentionally started.</p>
+      </section>
+    """
+    return app_view_html("System Guide", "guide", content, subtitle="How AgentOS routes uploads, staging, reviews, and fallback AI.")
 
 
 def _upload_safety_checklist_html() -> str:
@@ -6024,14 +6458,19 @@ def coding_review_page(task_id: str) -> str:
 def reviews_index_page() -> str:
     content = f"""
       <section class="agent-panel">
-        <h2>Reviews</h2>
-        <p>Human-readable reports from Coding Agent staging output. Review these before manually applying any script changes.</p>
+        <h2>Reviews and Reports</h2>
+        <p>Human-readable reports from AI checks and Coding Agent staging output. Review these before manually applying any script changes.</p>
         <div class="agent-actions">
           <a class="button" href="/reports/daily">Open Daily Coding Digest</a>
           <a class="button secondary" href="/upload">Open Upload Pipeline</a>
         </div>
       </section>
       {_review_index_html()}
+      <section class="agent-panel">
+        <h2>Recent reports</h2>
+        <p>Latest markdown, JSON, and text reports saved under the AgentOS reports folder.</p>
+      </section>
+      {_recent_reports_html()}
     """
     return app_view_html("Reviews", "reviews", content, subtitle="Review staged coding output before applying anything.")
 
@@ -6040,7 +6479,12 @@ def reviews_index_page() -> str:
 def coding_staging_page(task_id: str) -> str:
     from apps.coding_agent import app as coding_app
 
-    return _response_body_text(coding_app.staging_preview(task_id))
+    if task_id.startswith("coding-"):
+        try:
+            return _response_body_text(coding_app.staging_preview(task_id))
+        except HTTPException:
+            return _generic_staging_preview_html(task_id)
+    return _generic_staging_preview_html(task_id)
 
 
 @app.get("/staging", response_class=HTMLResponse)
@@ -6055,6 +6499,11 @@ def staging_index_page() -> str:
         </div>
       </section>
       {_staging_index_html()}
+      <section class="agent-panel">
+        <h2>Recent reports</h2>
+        <p>Use reports to decide whether staged output is ready for human testing.</p>
+      </section>
+      {_recent_reports_html(8)}
     """
     return app_view_html("Staging", "staging", content, subtitle="Staging-only script output.")
 
@@ -6087,12 +6536,28 @@ def upload_page() -> str:
       </section>
       <section class="progress-card">
         <div class="step" data-step="uploaded"><span></span><div><strong>Uploaded</strong><p>Files saved under incoming.</p></div></div>
-        <div class="step" data-step="planning"><span></span><div><strong>Planning</strong><p>Planner Agent analyzes the script.</p></div></div>
-        <div class="step" data-step="coding"><span></span><div><strong>Coding Agent</strong><p>Coding Agent creates staged changes only.</p></div></div>
-        <div class="step" data-step="reviewing"><span></span><div><strong>Review</strong><p>Human-readable review is generated.</p></div></div>
-        <div class="step" data-step="done"><span></span><div><strong>Done</strong><p>Plan, staging, and review links are ready.</p></div></div>
+        <div class="step" data-step="scanning"><span></span><div><strong>Scanning</strong><p>File tree, manifests, SQL, and config are inspected.</p></div></div>
+        <div class="step" data-step="planning"><span></span><div><strong>Planning</strong><p>Planner Agent analyzes framework and dependency risks.</p></div></div>
+        <div class="step" data-step="staging"><span></span><div><strong>Creating staging output</strong><p>Coding Agent creates staged changes only.</p></div></div>
+        <div class="step" data-step="reviewing"><span></span><div><strong>Reviewing</strong><p>Human-readable risk review is generated.</p></div></div>
+        <div class="step" data-step="ready"><span></span><div><strong>Ready for testing</strong><p>Plan, staging, and review links are ready.</p></div></div>
       </section>
       <section id="resultCard" class="result-card hidden"></section>
+      <section class="agent-panel">
+        <h2>Recent uploads and results</h2>
+        <p>Upload jobs are tracked locally under reports/upload-pipeline. The list is read-only.</p>
+      </section>
+      {_recent_upload_jobs_html()}
+      <section class="agent-panel">
+        <h2>Incoming scripts</h2>
+        <p>Raw uploaded scripts remain isolated under incoming until reviewed and staged.</p>
+      </section>
+      {_incoming_index_html()}
+      <section class="agent-panel">
+        <h2>Recent reports</h2>
+        <p>Reports from uploads and explicit AI integration checks appear here.</p>
+      </section>
+      {_recent_reports_html(8)}
     """
     return render_layout("Upload Pipeline", "upload", content, extra_css=_upload_page_css(), script=_upload_page_script(), subtitle="Planner to Coding to Review")
 
@@ -6117,6 +6582,7 @@ async def upload_pipeline(request: Request) -> dict[str, Any]:
     _save_upload_tracker(tracker)
 
     try:
+        _set_upload_status(tracker, "scanning")
         _set_upload_status(tracker, "planning")
         from apps.planner_agent import app as planner_app
         from apps.planner_agent.models import TaskCreate
@@ -6134,7 +6600,7 @@ async def upload_pipeline(request: Request) -> dict[str, Any]:
         tracker["plan_url"] = f"/tasks/{planner_result.task_id}/view"
         _save_upload_tracker(tracker)
 
-        _set_upload_status(tracker, "coding")
+        _set_upload_status(tracker, "staging")
         from apps.coding_agent import app as coding_app
         from apps.coding_agent.app import TaskRequest
 
@@ -6156,7 +6622,7 @@ async def upload_pipeline(request: Request) -> dict[str, Any]:
         _set_upload_status(tracker, "reviewing")
         tracker["review_url"] = coding_result.get("review_url") or f"/review/{coding_task_id}"
         tracker["review_created"] = bool(coding_result.get("review_report"))
-        _set_upload_status(tracker, "done")
+        _set_upload_status(tracker, "ready")
         return tracker
     except Exception as error:
         tracker["status"] = "failed"
@@ -6233,6 +6699,7 @@ def _upload_page_css() -> str:
       .result-card{padding:18px}
       .result-card h2{margin:0 0 8px}
       .result-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+      .ai-check-button{font:inherit}
       .hidden{display:none}
       @media (max-width: 700px){.upload-head,.safety-head{display:block}.safety-pill{display:inline-flex;margin-top:12px}.picker-row>*{width:100%;justify-content:center}.safety-grid{grid-template-columns:1fr}}
     """
@@ -6262,7 +6729,9 @@ def _upload_page_script() -> str:
         }
 
         function setProgress(status) {
-          const order = ["uploaded", "planning", "coding", "reviewing", "done"];
+          const aliases = { done: "ready", coding: "staging" };
+          status = aliases[status] || status;
+          const order = ["uploaded", "scanning", "planning", "staging", "reviewing", "ready"];
           const index = order.indexOf(status);
           document.querySelectorAll(".step").forEach(step => {
             const stepIndex = order.indexOf(step.dataset.step);
@@ -6307,13 +6776,14 @@ def _upload_page_script() -> str:
             setProgress("done");
             resultCard.classList.remove("hidden");
             resultCard.innerHTML = `
-              <h2>Pipeline Complete</h2>
+              <h2>Ready for Testing</h2>
               <p>${body.files?.length || selectedFiles.length} uploaded file(s) were processed safely. Live FiveM resources were not modified.</p>
               <div class="result-actions">
                 <a href="${body.plan_url || "#"}">View Plan</a>
                 <a href="${body.staging_url || "#"}">View Staging</a>
                 <a href="${body.review_url || "#"}">View Review</a>
                 <a href="/reports/daily">Open Daily Digest</a>
+                <button class="primary-button ai-check-button" type="button" data-path="${body.incoming_path || ""}">Run AI Integration Check</button>
               </div>
             `;
           } catch (error) {
@@ -6323,6 +6793,51 @@ def _upload_page_script() -> str:
           } finally {
             uploadButton.disabled = false;
           }
+        });
+
+        async function runAiCheck(path, button) {
+          if (!path) return;
+          const original = button ? button.textContent : "";
+          if (button) {
+            button.disabled = true;
+            button.textContent = "Running AI check...";
+          }
+          resultCard.classList.remove("hidden");
+          resultCard.innerHTML = "<h2>AI Integration Check</h2><p>Running bounded report-only analysis. No files will be modified.</p>";
+          try {
+            const response = await fetch("/api/ai-task", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                provider: "auto",
+                instruction: `Review ${path} as an incoming FiveM script. Use memory/playbooks/fivem-script-integration-checklist.md. Report framework, dependencies, SQL/config risks, staging-only recommendations, and next action. Do not edit files.`
+              }),
+            });
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.detail || body.error || "AI check failed.");
+            if (body.status === "failed") throw new Error(body.stderr || body.stdout || "AI check failed.");
+            resultCard.innerHTML = `
+              <h2>AI Integration Check Complete</h2>
+              <p>Provider used: ${body.provider_used || "unknown"}</p>
+              <div class="result-actions">
+                <a href="${body.report_url || "#"}">Open AI report</a>
+                <a href="/reviews">Open Reviews</a>
+              </div>
+            `;
+          } catch (error) {
+            resultCard.innerHTML = `<h2>AI Integration Check Failed</h2><p>${String(error.message || error)}</p>`;
+          } finally {
+            if (button) {
+              button.disabled = false;
+              button.textContent = original;
+            }
+          }
+        }
+
+        document.addEventListener("click", event => {
+          const button = event.target.closest(".ai-check-button");
+          if (!button) return;
+          runAiCheck(button.dataset.path, button);
         });
       </script>
     """
@@ -6432,6 +6947,133 @@ def _upload_coding_prompt(planner_task_id: str, plan: dict[str, Any]) -> str:
             "\n".join(f"- {item}" for item in plan.get("patch_plan_json", [])),
         ]
     )
+
+
+@app.get("/api/reports")
+def api_reports(limit: int = Query(default=80, ge=1, le=200)) -> dict[str, Any]:
+    return {"reports": _report_entries(limit)}
+
+
+@app.get("/api/reports/read")
+def api_report_read(path: str = Query(..., min_length=1)) -> dict[str, Any]:
+    report_path = _safe_workspace_file(path, "reports")
+    return {
+        "path": _relative_to_base(report_path),
+        "name": report_path.name,
+        "content": _read_text_preview(report_path),
+        "updated_at": datetime.fromtimestamp(report_path.stat().st_mtime, timezone.utc).isoformat(),
+    }
+
+
+@app.get("/reports/view", response_class=HTMLResponse)
+def report_file_view(path: str = Query(..., min_length=1)) -> str:
+    report_path = _safe_workspace_file(path, "reports")
+    content_text = _read_text_preview(report_path)
+    rel = _relative_to_base(report_path)
+    content = f"""
+      <section class="agent-panel">
+        <div class="card-title-row">
+          <h2>{esc(report_path.name)}</h2>
+          {_status_pill("read-only")}
+        </div>
+        <p class="subtle-id">{esc(rel)} · {esc(_format_timestamp(datetime.fromtimestamp(report_path.stat().st_mtime, timezone.utc).isoformat()))}</p>
+        <div class="agent-actions">
+          <a class="button" href="/reviews">Back to Reviews</a>
+          <a class="button secondary" href="/staging">Open Staging</a>
+        </div>
+      </section>
+      <section class="agent-panel report-view">
+        <h2>Report Content</h2>
+        <pre>{esc(content_text)}</pre>
+      </section>
+    """
+    return app_view_html("Report", "reviews", content, subtitle=rel)
+
+
+@app.get("/api/staging")
+def api_staging() -> dict[str, Any]:
+    entries = []
+    for entry in _staging_entries():
+        copy = dict(entry)
+        copy["path"] = _relative_to_base(Path(str(copy["path"])))
+        copy["url"] = f"/staging/{copy['task_id']}"
+        entries.append(copy)
+    return {"staging": entries}
+
+
+@app.get("/api/incoming")
+def api_incoming() -> dict[str, Any]:
+    return {"incoming": _incoming_entries()}
+
+
+@app.get("/api/upload-jobs")
+def api_upload_jobs() -> dict[str, Any]:
+    return {"jobs": _upload_jobs()}
+
+
+@app.post("/api/ai-task")
+def api_ai_task(payload: AITaskRequest) -> dict[str, Any]:
+    provider = payload.provider.strip().lower() or "auto"
+    if provider not in {"auto", "codex", "gemini", "opencode"}:
+        raise HTTPException(status_code=400, detail="Invalid AI provider.")
+    instruction = payload.instruction.strip()
+    if not instruction:
+        raise HTTPException(status_code=400, detail="Instruction is required.")
+    command = ["/home/agentzero/scripts/ai-task"]
+    if provider != "auto":
+        command.extend(["--provider", provider])
+    command.append(instruction[:4000])
+    env = os.environ.copy()
+    env.setdefault("AI_TASK_TIMEOUT_SECONDS", "75")
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=260,
+            check=False,
+            env=env,
+        )
+        result = {"stdout": completed.stdout, "stderr": completed.stderr, "exit_code": completed.returncode}
+    except subprocess.TimeoutExpired as error:
+        result = {
+            "stdout": error.stdout or "",
+            "stderr": (error.stderr or "") + "\nAI task router timed out.",
+            "exit_code": 124,
+        }
+    output = (result.get("stdout") or "").strip()
+    report_path = ""
+    provider_used = "none"
+    for line in output.splitlines():
+        if line.startswith("Provider used:"):
+            provider_used = line.split(":", 1)[1].strip()
+        if line.startswith(str(BASE_DIR / "reports")):
+            report_path = line.strip()
+    report_url = ""
+    if report_path:
+        try:
+            rel = Path(report_path).resolve().relative_to(BASE_DIR.resolve()).as_posix()
+            report_url = f"/reports/view?path={quote(rel)}"
+        except ValueError:
+            report_url = ""
+    if int(result.get("exit_code", 1)) != 0:
+        return {
+            "status": "failed",
+            "provider_used": provider_used,
+            "report_path": report_path,
+            "report_url": report_url,
+            "stdout": output,
+            "stderr": result.get("stderr", ""),
+            "exit_code": result.get("exit_code"),
+        }
+    return {
+        "status": "complete",
+        "provider_used": provider_used,
+        "report_path": report_path,
+        "report_url": report_url,
+        "exit_code": result.get("exit_code"),
+    }
 
 
 @app.get("/health")

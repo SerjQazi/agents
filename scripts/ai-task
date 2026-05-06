@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="/home/agentzero/agents"
+REPORT_DIR="$REPO_ROOT/reports"
+DEFAULT_TIMEOUT="${AI_TASK_TIMEOUT_SECONDS:-120}"
+MAX_OUTPUT_BYTES="${AI_TASK_MAX_OUTPUT_BYTES:-24000}"
+PROVIDER="${AI_TASK_PROVIDER:-auto}"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: ai-task [--provider auto|codex|gemini|opencode] "<instruction>"
+
+Environment:
+  AI_TASK_PROVIDER=auto|codex|gemini|opencode
+  AI_TASK_TIMEOUT_SECONDS=120
+  AI_TASK_MAX_OUTPUT_BYTES=24000
+  AI_TASK_GEMINI_MODEL=gemini-2.5-flash
+  AI_TASK_OPENCODE_MODEL=gemini/gemini-2.5-flash
+EOF
+}
+
+truncate_file() {
+  local source="$1"
+  local dest="$2"
+  if [[ -s "$source" ]]; then
+    head -c "$MAX_OUTPUT_BYTES" "$source" > "$dest"
+  else
+    : > "$dest"
+  fi
+}
+
+has_output() {
+  local file="$1"
+  [[ -s "$file" ]] && grep -q '[^[:space:]]' "$file"
+}
+
+build_prompt() {
+  local instruction="$1"
+  cat <<EOF
+You are running through the AgentOS AI fallback router.
+
+Hard constraints:
+- Work only inside /home/agentzero/agents.
+- Do not modify live FiveM resources.
+- Do not touch qb-core.
+- Do not run SQL.
+- Do not push to Git.
+- Do not restart services.
+- Keep the response bounded and practical.
+- Do not scan the full repository unless the user explicitly asks and the task cannot be answered otherwise.
+
+Instruction:
+$instruction
+EOF
+}
+
+run_codex() {
+  local prompt_file="$1"
+  local stdout_file="$2"
+  local stderr_file="$3"
+  local result_file="$4"
+  local last_message_file
+  last_message_file="$(mktemp)"
+
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "codex command not found" > "$stderr_file"
+    rm -f "$last_message_file"
+    return 127
+  fi
+
+  set +e
+  timeout "$DEFAULT_TIMEOUT" codex exec \
+    --cd "$REPO_ROOT" \
+    --sandbox read-only \
+    --ask-for-approval never \
+    --output-last-message "$last_message_file" \
+    - < "$prompt_file" > "$stdout_file" 2> "$stderr_file"
+  local status=$?
+  set -e
+
+  if [[ -s "$last_message_file" ]]; then
+    truncate_file "$last_message_file" "$result_file"
+  else
+    truncate_file "$stdout_file" "$result_file"
+  fi
+
+  rm -f "$last_message_file"
+  return "$status"
+}
+
+run_gemini() {
+  local prompt_file="$1"
+  local stdout_file="$2"
+  local stderr_file="$3"
+  local result_file="$4"
+  local model="${AI_TASK_GEMINI_MODEL:-gemini-2.5-flash}"
+
+  if ! command -v gemini >/dev/null 2>&1; then
+    echo "gemini command not found" > "$stderr_file"
+    return 127
+  fi
+
+  set +e
+  timeout "$DEFAULT_TIMEOUT" gemini \
+    --model "$model" \
+    --prompt "$(cat "$prompt_file")" \
+    --approval-mode plan \
+    --skip-trust \
+    --output-format text > "$stdout_file" 2> "$stderr_file"
+  local status=$?
+  set -e
+
+  truncate_file "$stdout_file" "$result_file"
+  return "$status"
+}
+
+run_opencode() {
+  local prompt_file="$1"
+  local stdout_file="$2"
+  local stderr_file="$3"
+  local result_file="$4"
+  local model="${AI_TASK_OPENCODE_MODEL:-gemini/gemini-2.5-flash}"
+
+  if ! command -v opencode >/dev/null 2>&1; then
+    echo "opencode command not found" > "$stderr_file"
+    return 127
+  fi
+
+  set +e
+  timeout "$DEFAULT_TIMEOUT" opencode run \
+    --dir "$REPO_ROOT" \
+    --model "$model" \
+    --agent script-integration-reviewer \
+    "$(cat "$prompt_file")" > "$stdout_file" 2> "$stderr_file"
+  local status=$?
+  set -e
+
+  truncate_file "$stdout_file" "$result_file"
+  return "$status"
+}
+
+try_provider() {
+  local provider="$1"
+  local prompt_file="$2"
+  local stdout_file="$3"
+  local stderr_file="$4"
+  local result_file="$5"
+
+  : > "$stdout_file"
+  : > "$stderr_file"
+  : > "$result_file"
+
+  case "$provider" in
+    codex) run_codex "$prompt_file" "$stdout_file" "$stderr_file" "$result_file" ;;
+    gemini) run_gemini "$prompt_file" "$stdout_file" "$stderr_file" "$result_file" ;;
+    opencode) run_opencode "$prompt_file" "$stdout_file" "$stderr_file" "$result_file" ;;
+    *)
+      echo "Unknown provider: $provider" > "$stderr_file"
+      return 2
+      ;;
+  esac
+}
+
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 2
+fi
+
+if [[ "${1:-}" == "--provider" ]]; then
+  if [[ $# -lt 3 ]]; then
+    usage
+    exit 2
+  fi
+  PROVIDER="$2"
+  shift 2
+fi
+
+case "$PROVIDER" in
+  auto|codex|gemini|opencode) ;;
+  *)
+    echo "Invalid provider: $PROVIDER" >&2
+    usage
+    exit 2
+    ;;
+esac
+
+instruction="$*"
+if [[ -z "${instruction//[[:space:]]/}" ]]; then
+  usage
+  exit 2
+fi
+
+cd "$REPO_ROOT"
+mkdir -p "$REPORT_DIR"
+
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+report_path="$REPORT_DIR/ai-task-$timestamp.md"
+prompt_file="$(mktemp)"
+stdout_file="$(mktemp)"
+stderr_file="$(mktemp)"
+result_file="$(mktemp)"
+attempts_file="$(mktemp)"
+trap 'rm -f "$prompt_file" "$stdout_file" "$stderr_file" "$result_file" "$attempts_file"' EXIT
+
+build_prompt "$instruction" > "$prompt_file"
+
+if [[ "$PROVIDER" == "auto" ]]; then
+  providers=(codex gemini opencode)
+else
+  providers=("$PROVIDER")
+fi
+
+used_provider=""
+final_status=1
+
+for provider in "${providers[@]}"; do
+  echo "## Attempt: $provider" >> "$attempts_file"
+  echo >> "$attempts_file"
+
+  if try_provider "$provider" "$prompt_file" "$stdout_file" "$stderr_file" "$result_file"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  echo "- Exit status: $status" >> "$attempts_file"
+  if has_output "$result_file"; then
+    echo "- Output: present" >> "$attempts_file"
+  else
+    echo "- Output: empty" >> "$attempts_file"
+  fi
+  if [[ -s "$stderr_file" ]]; then
+    echo "- Stderr: present" >> "$attempts_file"
+  else
+    echo "- Stderr: empty" >> "$attempts_file"
+  fi
+  echo >> "$attempts_file"
+
+  if [[ "$status" -eq 0 ]] && has_output "$result_file"; then
+    used_provider="$provider"
+    final_status=0
+    break
+  fi
+done
+
+{
+  echo "# ai-task report"
+  echo
+  echo "- Timestamp: $timestamp"
+  echo "- Mode: $PROVIDER"
+  if [[ -n "$used_provider" ]]; then
+    echo "- Provider used: $used_provider"
+  else
+    echo "- Provider used: none"
+  fi
+  echo "- Timeout per provider: ${DEFAULT_TIMEOUT}s"
+  echo "- Max output bytes: $MAX_OUTPUT_BYTES"
+  echo
+  echo "## Instruction"
+  echo
+  printf '%s\n' "$instruction"
+  echo
+  echo "## Attempts"
+  echo
+  cat "$attempts_file"
+  echo
+  echo "## Output"
+  echo
+  if [[ -n "$used_provider" ]]; then
+    cat "$result_file"
+  else
+    echo "All providers failed or returned empty output."
+    echo
+    echo "Last stderr:"
+    echo
+    cat "$stderr_file"
+  fi
+} > "$report_path"
+
+if [[ -n "$used_provider" ]]; then
+  echo "Provider used: $used_provider"
+else
+  echo "Provider used: none"
+fi
+echo "$report_path"
+
+exit "$final_status"

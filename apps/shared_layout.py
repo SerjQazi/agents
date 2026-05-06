@@ -25,6 +25,7 @@ def sidebar_html(active: str) -> str:
                 ("control", "/control", "Control Panels"),
                 ("agents", "/agents", "Agents"),
                 ("logs", "/logs", "Logs"),
+                ("guide", "/guide", "System Guide"),
             ],
         ),
         (
