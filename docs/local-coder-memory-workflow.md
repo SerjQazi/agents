@@ -37,6 +37,12 @@ Use the simple fix command for patch-style suggestions:
 coder-fix <file>
 ```
 
+Use the FiveM integration checker for an incoming or staged resource folder:
+
+```bash
+coder-integration-check <folder>
+```
+
 The script defaults to `qwen2.5-coder:3b`. Override it only when needed:
 
 ```bash
@@ -51,6 +57,14 @@ Reports are written to:
 
 `coder-review` and `coder-fix` print their reports to the terminal. They do not edit files.
 
+`coder-integration-check` writes a report to:
+
+```text
+/home/agentzero/agents/reports/coder-integration-check-<timestamp>.md
+```
+
+It does not send every file to Ollama. It first builds a shell-only summary of file tree, manifests, SQL/config/client/server/shared files, and dependency keywords, then sends only that summary plus the integration playbook.
+
 ## Safe Mode
 
 The offline wrappers call Ollama's local generate API directly and are bounded for the 4 vCPU / 8GB RAM CPU-only VM:
@@ -63,6 +77,7 @@ The offline wrappers call Ollama's local generate API directly and are bounded f
 - Default review output cap: `60` tokens
 - Default fix output cap: `90` tokens
 - Default task output cap: `60` tokens
+- Default integration-check output cap: `140` tokens
 - Default context cap: `1024` tokens
 
 Override only when needed:
@@ -85,6 +100,14 @@ coder-review scripts/git_helper.sh
 coder-fix scripts/git_helper.sh
 ```
 
+```bash
+coder-integration-check incoming/some-resource
+```
+
+```bash
+coder-integration-check staging/some-resource
+```
+
 ## Operating Model
 
 Keep local tasks small:
@@ -92,11 +115,13 @@ Keep local tasks small:
 - Good: identify ESX references in one Lua file.
 - Good: review one upload script for likely path or permission issues.
 - Good: suggest a small UI patch for one component.
+- Good: produce a short FiveM integration checklist from a folder summary.
 - Good: run one local Ollama command at a time.
 - Bad: refactor the repo.
 - Bad: infer architecture across many files.
 - Bad: edit, commit, push, or restart services.
 - Bad: launch several Ollama coding tasks in parallel on this VM.
+- Bad: point the local model at a live FiveM resource and ask it to edit files.
 
 When a report looks useful, review it manually or ask Codex to inspect it before applying any change.
 
