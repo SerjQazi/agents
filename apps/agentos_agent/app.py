@@ -90,6 +90,191 @@ def run_command(args: list[str]) -> dict:
     }
 
 
+# Dashboard V2 safe built-in task: read-only host checks for end-to-end task pipeline validation.
+def run_dashboard_v2_health_check_task() -> dict[str, Any]:
+    from orchestrator.models import Plan, RiskLevel, Step, StepStatus, Task, TaskStatus, TimelineEventType, ToolType
+    from orchestrator.store import TaskStore
+
+    store = TaskStore()
+    command_steps = [
+        'echo "Dashboard V2 task system works"',
+        "date",
+        "whoami",
+        "pwd",
+        "systemctl is-active agentos.service || true",
+    ]
+
+    step = Step(
+        name="Run read-only health check commands",
+        description="Execute safe shell checks and capture stdout/stderr for Dashboard V2 verification.",
+        tool=ToolType.LOCAL_SCRIPT,
+        purpose="Validate Dashboard V2 task system end-to-end",
+        risk_level=RiskLevel.SAFE,
+    )
+    plan = Plan(
+        name="Health Check Dashboard V2 Plan",
+        description="Single safe step to run read-only host commands.",
+        steps=[step],
+        total_steps=1,
+        completed_steps=0,
+    )
+    task = Task(
+        name="Health Check Dashboard V2",
+        description="Built-in Dashboard V2 safe test task.",
+        status=TaskStatus.PENDING,
+        dry_run=False,
+        approval_required=False,
+        plan=plan,
+        metadata={"source": "dashboard-v2", "built_in_task": "health_check_dashboard_v2"},
+        logs=[],
+    )
+    task.add_timeline(event_type=TimelineEventType.CREATED, step_id=step.step_id, step_name=step.name, details="Task queued")
+    task.logs.append("Queued: Health Check Dashboard V2")
+    store.create(task)
+
+    try:
+        task.status = TaskStatus.RUNNING
+        task.started_at = datetime.now()
+        step.status = StepStatus.RUNNING
+        step.started_at = datetime.now()
+        task.add_timeline(event_type=TimelineEventType.EXECUTING, step_id=step.step_id, step_name=step.name, tool_used=step.tool, risk_level=step.risk_level, details="Task running")
+        task.logs.append("Running: executing read-only commands")
+        store.update(task)
+
+        for command in command_steps:
+            result = subprocess.run(
+                ["bash", "-lc", command],
+                cwd=BASE_DIR,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            task.logs.append(f"$ {command}")
+            if result.stdout:
+                task.logs.append(f"stdout:\n{result.stdout.rstrip()}")
+            if result.stderr:
+                task.logs.append(f"stderr:\n{result.stderr.rstrip()}")
+            task.logs.append(f"exit_code: {result.returncode}")
+            store.update(task)
+
+        step.status = StepStatus.COMPLETED
+        step.completed_at = datetime.now()
+        task.plan.completed_steps = 1
+        task.status = TaskStatus.COMPLETED
+        task.completed_at = datetime.now()
+        task.add_timeline(
+            event_type=TimelineEventType.COMPLETED,
+            step_id=step.step_id,
+            step_name=step.name,
+            tool_used=step.tool,
+            risk_level=step.risk_level,
+            details="Task completed",
+        )
+        task.logs.append("Completed: Health Check Dashboard V2")
+        store.update(task)
+    except Exception as error:
+        step.status = StepStatus.FAILED
+        step.completed_at = datetime.now()
+        step.error = str(error)
+        task.status = TaskStatus.FAILED
+        task.completed_at = datetime.now()
+        task.add_timeline(
+            event_type=TimelineEventType.FAILED,
+            step_id=step.step_id,
+            step_name=step.name,
+            tool_used=step.tool,
+            risk_level=step.risk_level,
+            details=f"Task failed: {error}",
+        )
+        task.logs.append(f"Failed: {error}")
+        store.update(task)
+
+    return {"task_id": task.task_id, "status": task.status.value}
+
+
+# AGENTOS FIVEM CONTROL CENTER START
+def _detect_incoming_folder() -> dict[str, Any]:
+    candidates = [
+        BASE_DIR / "incoming",
+        BASE_DIR / "uploads" / "incoming",
+        BASE_DIR / "orchestrator" / "incoming",
+        BASE_DIR / "staging" / "incoming",
+        Path("/home/agentzero/agents/incoming"),
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            entries = [p for p in candidate.iterdir() if not p.name.startswith(".")]
+            return {
+                "path": str(candidate),
+                "entries_count": len(entries),
+            }
+    return {"path": None, "entries_count": 0}
+
+
+def _detect_fivem_server_path() -> str | None:
+    env_candidates = [
+        os.getenv("FIVEM_SERVER_PATH"),
+        os.getenv("QBCORE_SERVER_PATH"),
+        os.getenv("SERVER_PATH"),
+        os.getenv("FIVEM_PATH"),
+    ]
+    for raw in env_candidates:
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if path.exists():
+            return str(path)
+
+    known = Path("/home/agentzero/fivem-server/txData/QBCore_F16AC8.base")
+    if known.exists():
+        return str(known)
+
+    try:
+        from apps.planner_agent.config import settings as planner_settings
+
+        server_resources = planner_settings.server_resources
+        if server_resources.exists():
+            return str(server_resources.parent)
+    except Exception:
+        pass
+
+    return None
+
+
+def _analysis_artifacts_exist() -> bool:
+    report_roots = [
+        BASE_DIR / "reports" / "builder-agent",
+        BASE_DIR / "reports" / "coding-agent",
+    ]
+    for root in report_roots:
+        if root.is_dir() and any(root.iterdir()):
+            return True
+
+    report_globs = [
+        "integration-report-*.md",
+        "incoming-review-*.md",
+        "gemini-integration-check-*.md",
+    ]
+    reports_root = BASE_DIR / "reports"
+    if reports_root.is_dir():
+        for pattern in report_globs:
+            if any(reports_root.glob(pattern)):
+                return True
+    return False
+
+
+def _next_recommended_action(incoming_path: str | None, entries_count: int, analysis_exists: bool) -> str:
+    if not incoming_path:
+        return "Create or choose an incoming folder before starting script intake."
+    if entries_count == 0:
+        return "Upload a FiveM script ZIP/resource to begin analysis."
+    if not analysis_exists:
+        return "Run analysis on the uploaded script (Planner/AI integration check)."
+    return "Review patch plan and approve staged changes."
+# AGENTOS FIVEM CONTROL CENTER END
+
+
 def sanitize_commit_message(message: str) -> str:
     cleaned = DANGEROUS_MESSAGE_CHARS.sub("", message).strip()
     return cleaned[:120] or "Agent update"
@@ -2658,6 +2843,15 @@ def super_dashboard() -> str:
     blocked_ops = []
     execution_states = []
     risk_distribution = {"safe": 0, "low": 0, "medium": 0, "high": 0, "critical": 0}
+    latest_health_check_logs: list[str] = []
+    # AGENTOS FIVEM CONTROL CENTER START
+    incoming_info = _detect_incoming_folder()
+    incoming_path = incoming_info["path"]
+    incoming_entries_count = int(incoming_info["entries_count"])
+    fivem_server_path = _detect_fivem_server_path()
+    analysis_exists = _analysis_artifacts_exist()
+    next_action = _next_recommended_action(incoming_path, incoming_entries_count, analysis_exists)
+    # AGENTOS FIVEM CONTROL CENTER END
 
     try:
         import sys
@@ -2698,6 +2892,8 @@ def super_dashboard() -> str:
             elif status == "completed":
                 tasks_data["completed"].append(task_info)
                 stats["completed"] += 1
+                if task.name == "Health Check Dashboard V2":
+                    latest_health_check_logs = task.logs[-30:]
             elif status == "failed" or status == "cancelled":
                 tasks_data["failed"].append(task_info)
                 stats["failed"] += 1
@@ -2779,6 +2975,12 @@ def super_dashboard() -> str:
     if not completed_tasks_html:
         completed_tasks_html = '<div class="empty-state">No completed tasks</div>'
 
+    health_check_logs_html = ""
+    if latest_health_check_logs:
+        health_check_logs_html = "<pre class=\"health-check-logs\">" + html.escape("\n".join(latest_health_check_logs)) + "</pre>"
+    else:
+        health_check_logs_html = '<div class="empty-state">No Health Check Dashboard V2 logs yet</div>'
+
     approvals_html = ""
     for app in approvals_data[:5]:
         risk = app.get("risk_level", "unknown")
@@ -2843,14 +3045,49 @@ def super_dashboard() -> str:
     content = f'''
     <div class="super-header">
         <div class="super-title">
-            <h1>AgentOS Super Dashboard</h1>
-            <p>Real-time orchestration overview • {stats["total"]} total tasks</p>
+            <h1>AgentOS FiveM Control Center</h1>
+            <p>Upload, analyze, stage, approve, and integrate FiveM scripts safely.</p>
         </div>
         <div class="connection-indicator {connection_class}">
             <span class="connection-dot"></span>
             { "Connected to Orchestrator" if orchestrator_available else "Orchestrator Unavailable" }
         </div>
     </div>
+
+    <section class="section workflow-section">
+        <h2><span class="section-icon">🧭</span>FiveM Integration Workflow</h2>
+        <div class="workflow-steps">
+            <span class="workflow-step">1 Upload Script</span>
+            <span class="workflow-step">2 Analyze</span>
+            <span class="workflow-step">3 Review Patch Plan</span>
+            <span class="workflow-step">4 Approve</span>
+            <span class="workflow-step">5 Stage</span>
+            <span class="workflow-step">6 Apply</span>
+            <span class="workflow-step">7 Test Server</span>
+            <span class="workflow-step">8 Push Git</span>
+        </div>
+    </section>
+
+    <section class="section fivem-focus-grid">
+        <div class="focus-card">
+            <h3>Upload FiveM Script</h3>
+            <p>Upload a ZIP or resource folder for analysis before touching the live server.</p>
+            <a class="button" href="/upload">Open Upload Pipeline</a>
+        </div>
+        <div class="focus-card">
+            <h3>Incoming Scripts</h3>
+            <p>{html.escape(incoming_path) if incoming_path else "No incoming folder detected."}</p>
+            <p class="focus-meta">{incoming_entries_count} item(s) detected</p>
+        </div>
+        <div class="focus-card">
+            <h3>FiveM Server Target</h3>
+            <p>{html.escape(fivem_server_path) if fivem_server_path else "Server path not configured."}</p>
+        </div>
+        <div class="focus-card">
+            <h3>Next Recommended Action</h3>
+            <p>{html.escape(next_action)}</p>
+        </div>
+    </section>
 
     <section class="status-grid">
         <div class="status-card">
@@ -2889,6 +3126,11 @@ def super_dashboard() -> str:
         <section class="section tasks-section">
             <h2><span class="section-icon">✅</span>Completed</h2>
             <div class="task-list">{completed_tasks_html}</div>
+        </section>
+
+        <section class="section tasks-section">
+            <h2><span class="section-icon">🧪</span>Health Check Dashboard V2 Logs</h2>
+            <div class="task-list">{health_check_logs_html}</div>
         </section>
 
         <section class="section approvals-section">
@@ -3009,6 +3251,11 @@ def super_dashboard() -> str:
             </div>
         </div>
     </section>
+
+    <section class="section">
+        <h2><span class="section-icon">🩺</span>AgentOS Health Check</h2>
+        <button class="health-check-button" type="button" onclick="runHealthCheckDashboardV2Task()">Run AgentOS Health Check</button>
+    </section>
     '''
 
     extra_css = '''
@@ -3018,6 +3265,31 @@ def super_dashboard() -> str:
             align-items: center;
             margin-bottom: 24px;
         }
+        .health-check-button {
+            border: 1px solid var(--ao-border);
+            background: var(--ao-panel);
+            color: var(--ao-text);
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .health-check-button:hover {
+            border-color: var(--ao-cyan);
+        }
+        .health-check-logs {
+            margin: 0;
+            padding: 12px;
+            background: var(--ao-panel);
+            border: 1px solid var(--ao-border);
+            border-radius: 8px;
+            color: var(--ao-text);
+            font-size: 11px;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            overflow-x: auto;
+        }
         .super-title h1 {
             font-size: 26px;
             font-weight: 700;
@@ -3026,6 +3298,52 @@ def super_dashboard() -> str:
         .super-title p {
             color: var(--ao-muted);
             font-size: 14px;
+        }
+        .workflow-section {
+            margin-bottom: 20px;
+        }
+        .workflow-steps {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+        }
+        .workflow-step {
+            border: 1px solid var(--ao-border);
+            border-radius: 8px;
+            background: var(--ao-panel);
+            color: var(--ao-text);
+            font-size: 12px;
+            font-weight: 600;
+            padding: 8px 10px;
+            text-align: center;
+        }
+        .fivem-focus-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .focus-card {
+            border: 1px solid var(--ao-border);
+            border-radius: 10px;
+            background: var(--ao-panel);
+            padding: 14px;
+        }
+        .focus-card h3 {
+            font-size: 15px;
+            margin-bottom: 8px;
+            color: var(--ao-text);
+        }
+        .focus-card p {
+            font-size: 12px;
+            color: var(--ao-muted);
+            margin-bottom: 8px;
+            word-break: break-word;
+        }
+        .focus-card .focus-meta {
+            color: var(--ao-soft);
+            font-size: 11px;
+            margin-bottom: 0;
         }
         .connection-indicator {
             display: flex;
@@ -3314,10 +3632,29 @@ def super_dashboard() -> str:
             .dashboard-grid { grid-template-columns: 1fr; }
             .task-item { grid-template-columns: 60px 1fr auto; }
             .info-grid { grid-template-columns: 1fr; }
+            .workflow-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .fivem-focus-grid { grid-template-columns: 1fr; }
         }
     '''
 
-    return render_layout("AgentOS Super Dashboard", "dashboard-v2", content, extra_css)
+    extra_js = '''
+        async function runHealthCheckDashboardV2Task() {
+            const response = await fetch("/dashboard-v2/tasks/health-check", { method: "POST" });
+            if (!response.ok) {
+                alert("Failed to start Health Check Dashboard V2 task.");
+                return;
+            }
+            window.location.reload();
+        }
+    '''
+
+    return render_layout("AgentOS FiveM Control Center", "dashboard-v2", content, extra_css, extra_js)
+
+
+@app.post("/dashboard-v2/tasks/health-check")
+def run_dashboard_v2_health_check() -> dict[str, Any]:
+    # Built-in safe task trigger for Dashboard V2 end-to-end task verification.
+    return run_dashboard_v2_health_check_task()
 
 
 @app.get("/control", response_class=HTMLResponse)

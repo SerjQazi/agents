@@ -23,7 +23,7 @@ def sidebar_html(active: str) -> str:
             [
                 ("dashboard", "/", "Dashboard"),
                 ("dashboard-v2", "/dashboard-v2", "Dashboard V2"),
-                ("control", "/control", "Control Panels"),
+                ("control", "/ops", "Control Panels"),
                 ("agents", "/agents", "Agents"),
                 ("logs", "/logs", "Logs"),
                 ("guide", "/guide", "System Guide"),
@@ -246,6 +246,19 @@ def layout_css() -> str:
         font-size: 26px; /* Larger title */
         line-height: 1.2;
         font-weight: 700;
+      }
+      .home-badge {
+        display: inline-block;
+        margin-left: 12px;
+        padding: 3px 10px;
+        border: 1px solid rgba(55, 214, 122, 0.32);
+        border-radius: 999px;
+        background: rgba(21, 128, 61, 0.14);
+        color: var(--ao-green);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        vertical-align: middle;
       }
       .ao-topbar p {
         margin-top: 6px; /* More spacing below title */

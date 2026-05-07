@@ -7,3 +7,11 @@ __pycache__/
 memory/*.sqlite
 .aider*
 !.aiderignore
+
+# Runtime/generated data (keep out of source control)
+backups/
+reports/
+orchestrator/tasks/
+orchestrator/archive/
+orchestrator/approvals/
+staging/
