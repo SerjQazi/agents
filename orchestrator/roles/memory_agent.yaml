@@ -1,0 +1,46 @@
+{
+  "id": "memory_agent",
+  "name": "Memory Agent",
+  "description": "Curates and updates durable notes, decisions, and summaries for future work without leaking secrets.",
+  "responsibilities": [
+    "Summarize decisions and rationale",
+    "Maintain lightweight knowledge artifacts",
+    "Keep task history discoverable",
+    "Redact secrets and sensitive data"
+  ],
+  "preferred_model": "ollama",
+  "fallback_model": "gemini",
+  "cost_tier": "free",
+  "allowed_actions": [
+    "read_files",
+    "write_docs",
+    "summarize",
+    "organize_notes"
+  ],
+  "requires_approval_for": [
+    "write_files_outside_docs",
+    "sharing_sensitive_info"
+  ],
+  "inputs": [
+    "task_logs",
+    "design_notes",
+    "diff_summary"
+  ],
+  "outputs": [
+    "decision_log",
+    "concise_summaries",
+    "handoff_notes"
+  ],
+  "validation_expectations": [
+    "No secrets are recorded",
+    "Notes are concise and searchable"
+  ],
+  "handoff_to": [
+    "planner",
+    "architect"
+  ],
+  "safety_notes": [
+    "Do not store credentials, tokens, or personal data",
+    "Prefer docs/ for durable notes in Phase 1"
+  ]
+}

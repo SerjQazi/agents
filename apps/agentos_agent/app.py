@@ -8,6 +8,7 @@ import shutil
 import socket
 import subprocess
 import zipfile
+import math # Added for dashboard rendering helpers
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ from core.agent_core.config import settings
 from core.agent_core.controller import AgentController
 from core.agent_core.self_healing_agent import SelfHealingAgent
 from core.agent_core.system_watcher import SystemWatcher
-from apps.shared_layout import layout_css, render_layout
+from apps.shared_layout import layout_css, render_layout # layout_css is likely unused in app.py now, but kept for historical
 
 
 app = FastAPI(title=settings.app_name)
@@ -2642,6 +2643,681 @@ def dashboard() -> str:
       </body>
     </html>
     """
+
+
+@app.get("/dashboard-v2", response_class=HTMLResponse)
+def super_dashboard() -> str:
+    from apps.shared_layout import render_layout, layout_css
+
+    orchestrator_available = False
+    tasks_data = {"active": [], "paused": [], "completed": [], "failed": []}
+    approvals_data = []
+    stats = {"total": 0, "active": 0, "paused": 0, "completed": 0, "failed": 0}
+    timelines_data = []
+    audit_logs = []
+    blocked_ops = []
+    execution_states = []
+    risk_distribution = {"safe": 0, "low": 0, "medium": 0, "high": 0, "critical": 0}
+
+    try:
+        import sys
+        import json
+        sys.path.insert(0, "/home/agentzero/agents")
+        from orchestrator.store import TaskStore
+        from orchestrator.recovery import RecoveryManager
+        from orchestrator import Orchestrator
+
+        store = TaskStore()
+        rm = RecoveryManager()
+
+        all_tasks = store.list_all()
+        stats["total"] = len(all_tasks)
+
+        for task in all_tasks:
+            status = task.status.value
+
+            task_info = {
+                "id": task.task_id,
+                "name": task.name,
+                "status": status,
+                "dry_run": task.dry_run,
+                "approval_required": task.approval_required,
+                "steps": len(task.plan.steps) if task.plan else 0,
+                "updated": task.updated_at.isoformat() if task.updated_at else "",
+                "timeline_count": len(task.timeline),
+                "created": task.created_at.isoformat() if task.created_at else "",
+                "completed_at": task.completed_at.isoformat() if task.completed_at else "",
+            }
+
+            if status == "pending" or status == "planning" or status == "ready" or status == "running":
+                tasks_data["active"].append(task_info)
+                stats["active"] += 1
+            elif status == "paused":
+                tasks_data["paused"].append(task_info)
+                stats["paused"] += 1
+            elif status == "completed":
+                tasks_data["completed"].append(task_info)
+                stats["completed"] += 1
+            elif status == "failed" or status == "cancelled":
+                tasks_data["failed"].append(task_info)
+                stats["failed"] += 1
+
+            if task.plan and task.plan.steps:
+                for step in task.plan.steps:
+                    risk = step.risk_level.value
+                    if risk in risk_distribution:
+                        risk_distribution[risk] += 1
+
+                    for te in task.timeline[-3:]:
+                        if te.event_type.value in ("executing", "validated", "completed", "failed"):
+                            timelines_data.append({
+                                "task_id": task.task_id[:8],
+                                "task_name": task.name[:20],
+                                "step_id": te.step_id or "",
+                                "step_name": te.step_name or "",
+                                "event": te.event_type.value,
+                                "timestamp": te.timestamp.isoformat() if te.timestamp else "",
+                                "duration_ms": te.duration_ms or 0,
+                                "details": te.details or "",
+                            })
+
+                    if step.status.value == "failed" and step.error:
+                        blocked_ops.append({
+                            "task_id": task.task_id[:8],
+                            "task_name": task.name[:20],
+                            "step_name": step.name[:25],
+                            "error": step.error[:50],
+                            "risk": step.risk_level.value,
+                        })
+
+        approvals_data = rm.get_pending_approvals()
+
+        try:
+            orch = Orchestrator(store=store, dry_run_default=True)
+            execution_states = orch.get_execution_audit_log()[:10]
+        except Exception:
+            pass
+
+        orchestrator_available = True
+
+    except Exception as e:
+        orchestrator_available = False
+
+    active_tasks_html = ""
+    for task in tasks_data["active"][:5]:
+        active_tasks_html += f'''
+        <div class="task-item">
+            <span class="task-id">{task["id"][:8]}...</span>
+            <span class="task-name">{task["name"][:30]}{"..." if len(task["name"]) > 30 else ""}</span>
+            <span class="task-status active">{task["status"]}</span>
+            <span class="task-steps">{task["steps"]} steps</span>
+        </div>'''
+    if not active_tasks_html:
+        active_tasks_html = '<div class="empty-state">No active tasks</div>'
+
+    paused_tasks_html = ""
+    for task in tasks_data["paused"][:5]:
+        risk_badge = "⚠️" if task.get("approval_required") else ""
+        paused_tasks_html += f'''
+        <div class="task-item">
+            <span class="task-id">{task["id"][:8]}...</span>
+            <span class="task-name">{task["name"][:25]}{"..." if len(task["name"]) > 25 else ""}</span>
+            <span class="task-status paused">{task["status"]}</span>
+            <span class="task-approval">{risk_badge}</span>
+        </div>'''
+    if not paused_tasks_html:
+        paused_tasks_html = '<div class="empty-state">No paused tasks</div>'
+
+    completed_tasks_html = ""
+    for task in tasks_data["completed"][:5]:
+        completed_tasks_html += f'''
+        <div class="task-item">
+            <span class="task-id">{task["id"][:8]}...</span>
+            <span class="task-name">{task["name"][:30]}{"..." if len(task["name"]) > 30 else ""}</span>
+            <span class="task-status completed">{task["status"]}</span>
+        </div>'''
+    if not completed_tasks_html:
+        completed_tasks_html = '<div class="empty-state">No completed tasks</div>'
+
+    approvals_html = ""
+    for app in approvals_data[:5]:
+        risk = app.get("risk_level", "unknown")
+        approvals_html += f'''
+        <div class="approval-item">
+            <span class="approval-task">{app.get("task_id", "unknown")[:8]}...</span>
+            <span class="approval-step">{app.get("step_name", "unknown")}</span>
+            <span class="approval-risk {risk}">{risk}</span>
+        </div>'''
+    if not approvals_html:
+        approvals_html = '<div class="empty-state">No pending approvals</div>'
+
+    timelines_html = ""
+    for te in timelines_data[:10]:
+        timelines_html += f'''
+        <div class="timeline-item">
+            <span class="timeline-task">{te.get("task_id", "")}...</span>
+            <span class="timeline-step">{te.get("step_name", "")[:20]}</span>
+            <span class="timeline-event {te.get("event", "")}">{te.get("event", "")}</span>
+            <span class="timeline-duration">{te.get("duration_ms", 0)}ms</span>
+        </div>'''
+    if not timelines_html:
+        timelines_html = '<div class="empty-state">No timeline events</div>'
+
+    blocked_html = ""
+    for blk in blocked_ops[:10]:
+        blocked_html += f'''
+        <div class="blocked-item">
+            <span class="blocked-task">{blk.get("task_id", "")}</span>
+            <span class="blocked-step">{blk.get("step_name", "")}</span>
+            <span class="blocked-error">{blk.get("error", "")}</span>
+            <span class="blocked-risk {blk.get("risk", "")}">{blk.get("risk", "")}</span>
+        </div>'''
+    if not blocked_html:
+        blocked_html = '<div class="empty-state">No blocked operations</div>'
+
+    audit_html = ""
+    for audit in execution_states[:10]:
+        audit_html += f'''
+        <div class="audit-item">
+            <span class="audit-status {audit.get("status", "")}">{audit.get("status", "")}</span>
+            <span class="audit-command">{audit.get("command", "N/A")[:30]}</span>
+            <span class="audit-risk">{audit.get("risk", "")}</span>
+        </div>'''
+    if not audit_html:
+        audit_html = '<div class="empty-state">No audit logs</div>'
+
+    execution_html = ""
+    for exec_state in execution_states[:10]:
+        execution_html += f'''
+        <div class="execution-item">
+            <span class="exec-status {exec_state.get("status", "")}">{exec_state.get("status", "")}</span>
+            <span class="exec-command">{exec_state.get("command", "N/A")[:25]}</span>
+            <span class="exec-risk">{exec_state.get("risk", "")}</span>
+        </div>'''
+    if not execution_html:
+        execution_html = '<div class="empty-state">No execution states</div>'
+
+    connection_status = "online" if orchestrator_available else "disconnected"
+    connection_class = "online" if orchestrator_available else "offline"
+
+    content = f'''
+    <div class="super-header">
+        <div class="super-title">
+            <h1>AgentOS Super Dashboard</h1>
+            <p>Real-time orchestration overview • {stats["total"]} total tasks</p>
+        </div>
+        <div class="connection-indicator {connection_class}">
+            <span class="connection-dot"></span>
+            { "Connected to Orchestrator" if orchestrator_available else "Orchestrator Unavailable" }
+        </div>
+    </div>
+
+    <section class="status-grid">
+        <div class="status-card">
+            <div class="status-label">AgentOS</div>
+            <div class="status-value {connection_class}">{ "Online" if orchestrator_available else "Disconnected" }</div>
+        </div>
+        <div class="status-card">
+            <div class="status-label">Active Tasks</div>
+            <div class="status-value">{stats["active"]}</div>
+        </div>
+        <div class="status-card">
+            <div class="status-label">Paused (Awaiting Approval)</div>
+            <div class="status-value warning">{stats["paused"]}</div>
+        </div>
+        <div class="status-card">
+            <div class="status-label">Completed</div>
+            <div class="status-value success">{stats["completed"]}</div>
+        </div>
+        <div class="status-card">
+            <div class="status-label">Failed</div>
+            <div class="status-value danger">{stats["failed"]}</div>
+        </div>
+    </section>
+
+    <div class="dashboard-grid">
+        <section class="section tasks-section">
+            <h2><span class="section-icon">▶️</span>Active Tasks</h2>
+            <div class="task-list">{active_tasks_html}</div>
+        </section>
+
+        <section class="section tasks-section">
+            <h2><span class="section-icon">⏸️</span>Paused (Awaiting Approval)</h2>
+            <div class="task-list">{paused_tasks_html}</div>
+        </section>
+
+        <section class="section tasks-section">
+            <h2><span class="section-icon">✅</span>Completed</h2>
+            <div class="task-list">{completed_tasks_html}</div>
+        </section>
+
+        <section class="section approvals-section">
+            <h2><span class="section-icon">🔐</span>Approval Queue</h2>
+            <div class="approval-list">{approvals_html}</div>
+        </section>
+
+        <section class="section timelines-section">
+            <h2><span class="section-icon">📜</span>Execution Timelines</h2>
+            <div class="timeline-list">{timelines_html}</div>
+        </section>
+
+        <section class="section blocked-section">
+            <h2><span class="section-icon">🚫</span>Blocked Operations</h2>
+            <div class="blocked-list">{blocked_html}</div>
+        </section>
+
+        <section class="section audit-section">
+            <h2><span class="section-icon">📋</span>Audit Logs</h2>
+            <div class="audit-list">{audit_html}</div>
+        </section>
+
+        <section class="section risk-section">
+            <h2><span class="section-icon">⚠️</span>Risk Distribution</h2>
+            <div class="risk-bars">
+                <div class="risk-bar">
+                    <div class="risk-label">Safe</div>
+                    <div class="risk-track">
+                        <div class="risk-fill safe" style="width: { (risk_distribution['safe'] / max(stats['total'], 1)) * 100 }%"></div>
+                    </div>
+                    <div class="risk-value">{risk_distribution['safe']}</div>
+                </div>
+                <div class="risk-bar">
+                    <div class="risk-label">Low</div>
+                    <div class="risk-track">
+                        <div class="risk-fill low" style="width: { (risk_distribution['low'] / max(stats['total'], 1)) * 100 }%"></div>
+                    </div>
+                    <div class="risk-value">{risk_distribution['low']}</div>
+                </div>
+                <div class="risk-bar">
+                    <div class="risk-label">Medium</div>
+                    <div class="risk-track">
+                        <div class="risk-fill medium" style="width: { (risk_distribution['medium'] / max(stats['total'], 1)) * 100 }%"></div>
+                    </div>
+                    <div class="risk-value">{risk_distribution['medium']}</div>
+                </div>
+                <div class="risk-bar">
+                    <div class="risk-label">High</div>
+                    <div class="risk-track">
+                        <div class="risk-fill high" style="width: { (risk_distribution['high'] / max(stats['total'], 1)) * 100 }%"></div>
+                    </div>
+                    <div class="risk-value">{risk_distribution['high']}</div>
+                </div>
+                <div class="risk-bar">
+                    <div class="risk-label">Critical</div>
+                    <div class="risk-track">
+                        <div class="risk-fill critical" style="width: { (risk_distribution['critical'] / max(stats['total'], 1)) * 100 }%"></div>
+                    </div>
+                    <div class="risk-value">{risk_distribution['critical']}</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="section execution-section">
+            <h2><span class="section-icon">🔧</span>Execution States</h2>
+            <div class="execution-list">{execution_html}</div>
+        </section>
+    </div>
+
+    <section class="section">
+        <h2><span class="section-icon">📊</span>Task Distribution</h2>
+        <div class="distribution-bars">
+            <div class="dist-bar">
+                <div class="dist-label">Active</div>
+                <div class="dist-track">
+                    <div class="dist-fill active" style="width: { (stats['active'] / max(stats['total'], 1)) * 100 }%"></div>
+                </div>
+                <div class="dist-value">{stats['active']}</div>
+            </div>
+            <div class="dist-bar">
+                <div class="dist-label">Paused</div>
+                <div class="dist-track">
+                    <div class="dist-fill paused" style="width: { (stats['paused'] / max(stats['total'], 1)) * 100 }%"></div>
+                </div>
+                <div class="dist-value">{stats['paused']}</div>
+            </div>
+            <div class="dist-bar">
+                <div class="dist-label">Completed</div>
+                <div class="dist-track">
+                    <div class="dist-fill completed" style="width: { (stats['completed'] / max(stats['total'], 1)) * 100 }%"></div>
+                </div>
+                <div class="dist-value">{stats['completed']}</div>
+            </div>
+            <div class="dist-bar">
+                <div class="dist-label">Failed</div>
+                <div class="dist-track">
+                    <div class="dist-fill failed" style="width: { (stats['failed'] / max(stats['total'], 1)) * 100 }%"></div>
+                </div>
+                <div class="dist-value">{stats['failed']}</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="section info-section">
+        <h2><span class="section-icon">ℹ️</span>Orchestrator Info</h2>
+        <div class="info-grid">
+            <div class="info-item">
+                <span class="info-label">Storage Path</span>
+                <span class="info-value">/home/agentzero/agents/orchestrator/tasks</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Data Mode</span>
+                <span class="info-value">Read-only Visualization</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Connection</span>
+                <span class="info-value {connection_class}">{ "Live" if orchestrator_available else "Fallback Mode" }</span>
+            </div>
+        </div>
+    </section>
+    '''
+
+    extra_css = '''
+        .super-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+        }
+        .super-title h1 {
+            font-size: 26px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        .super-title p {
+            color: var(--ao-muted);
+            font-size: 14px;
+        }
+        .connection-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .connection-indicator.online {
+            background: rgba(55, 214, 122, 0.15);
+            border: 1px solid rgba(55, 214, 122, 0.3);
+            color: var(--ao-green);
+        }
+        .connection-indicator.offline {
+            background: rgba(255, 99, 112, 0.15);
+            border: 1px solid rgba(255, 99, 112, 0.3);
+            color: var(--ao-danger);
+        }
+        .connection-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+        .status-card {
+            padding: 16px;
+            border: 1px solid var(--ao-border);
+            border-radius: 10px;
+            background: var(--ao-panel);
+        }
+        .status-label {
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--ao-soft);
+            margin-bottom: 8px;
+        }
+        .status-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--ao-text);
+        }
+        .status-value.online, .status-value.success { color: var(--ao-green); }
+        .status-value.warning { color: #fbbf24; }
+        .status-value.danger { color: var(--ao-danger); }
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+        .section h2 {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 16px;
+            margin-bottom: 14px;
+            color: var(--ao-text);
+        }
+        .section-icon { font-size: 16px; }
+        .task-list, .approval-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .task-item, .approval-item {
+            display: grid;
+            grid-template-columns: 70px 1fr auto auto;
+            gap: 10px;
+            align-items: center;
+            padding: 10px 12px;
+            border: 1px solid var(--ao-border);
+            border-radius: 8px;
+            background: var(--ao-panel);
+            font-size: 12px;
+        }
+        .task-id, .approval-task {
+            font-family: monospace;
+            color: var(--ao-soft);
+        }
+        .task-name, .approval-step {
+            color: var(--ao-text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .task-status {
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .task-status.active { background: rgba(55, 214, 122, 0.15); color: var(--ao-green); }
+        .task-status.paused { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+        .task-status.completed { background: rgba(0, 212, 255, 0.15); color: var(--ao-cyan); }
+        .task-steps, .task-approval {
+            font-size: 10px;
+            color: var(--ao-soft);
+        }
+        .approval-risk {
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .approval-risk.high { background: rgba(255, 99, 112, 0.15); color: var(--ao-danger); }
+        .approval-risk.medium { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+        .approval-risk.unknown { background: rgba(125, 211, 252, 0.15); color: var(--ao-blue); }
+        .empty-state {
+            padding: 20px;
+            text-align: center;
+            color: var(--ao-soft);
+            font-size: 12px;
+            border: 1px dashed var(--ao-border);
+            border-radius: 8px;
+        }
+        .distribution-bars {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .dist-bar {
+            display: grid;
+            grid-template-columns: 80px 1fr 40px;
+            gap: 10px;
+            align-items: center;
+        }
+        .dist-label {
+            font-size: 12px;
+            color: var(--ao-muted);
+        }
+        .dist-track {
+            height: 8px;
+            background: var(--ao-border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .dist-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+        .dist-fill.active { background: var(--ao-green); }
+        .dist-fill.paused { background: #fbbf24; }
+        .dist-fill.completed { background: var(--ao-cyan); }
+        .dist-fill.failed { background: var(--ao-danger); }
+        .dist-value {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--ao-text);
+            text-align: right;
+        }
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+        }
+        .info-item {
+            padding: 12px;
+            border: 1px solid var(--ao-border);
+            border-radius: 8px;
+            background: var(--ao-panel);
+        }
+        .info-label {
+            display: block;
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            color: var(--ao-soft);
+            margin-bottom: 4px;
+        }
+        .info-value {
+            font-size: 13px;
+            color: var(--ao-text);
+        }
+        .info-value.online { color: var(--ao-green); }
+        .info-value.offline { color: var(--ao-danger); }
+
+        .timelines-section, .blocked-section, .audit-section, .execution-section, .risk-section {
+            margin-bottom: 20px;
+        }
+        .timeline-list, .blocked-list, .audit-list, .execution-list, .risk-bars {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .timeline-item, .blocked-item, .audit-item, .execution-item {
+            display: grid;
+            grid-template-columns: 70px 1fr auto auto;
+            gap: 10px;
+            align-items: center;
+            padding: 8px 12px;
+            border: 1px solid var(--ao-border);
+            border-radius: 6px;
+            background: var(--ao-panel);
+            font-size: 11px;
+        }
+        .timeline-task, .blocked-task, .audit-status, .exec-status {
+            font-family: monospace;
+            color: var(--ao-soft);
+        }
+        .timeline-step, .blocked-step, .audit-command, .exec-command {
+            color: var(--ao-text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .timeline-event, .blocked-risk, .exec-risk {
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 9px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .timeline-event.executing { background: rgba(55, 214, 122, 0.15); color: var(--ao-green); }
+        .timeline-event.validated { background: rgba(0, 212, 255, 0.15); color: var(--ao-cyan); }
+        .timeline-event.completed { background: rgba(55, 214, 122, 0.15); color: var(--ao-green); }
+        .timeline-event.failed { background: rgba(255, 99, 112, 0.15); color: var(--ao-danger); }
+        .timeline-duration, .blocked-error, .audit-risk {
+            color: var(--ao-soft);
+            font-size: 10px;
+        }
+        .blocked-risk.safe { background: rgba(55, 214, 122, 0.15); color: var(--ao-green); }
+        .blocked-risk.low { background: rgba(110, 203, 255, 0.15); color: var(--ao-blue); }
+        .blocked-risk.medium { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+        .blocked-risk.high { background: rgba(255, 99, 112, 0.15); color: var(--ao-danger); }
+        .blocked-risk.critical { background: rgba(255, 99, 112, 0.25); color: var(--ao-danger); }
+        .audit-status.blocked { background: rgba(255, 99, 112, 0.15); color: var(--ao-danger); }
+        .audit-status.executed { background: rgba(55, 214, 122, 0.15); color: var(--ao-green); }
+        .audit-status.dry_run { background: rgba(0, 212, 255, 0.15); color: var(--ao-cyan); }
+        .exec-status.blocked { background: rgba(255, 99, 112, 0.15); color: var(--ao-danger); }
+        .exec-status.executed { background: rgba(55, 214, 122, 0.15); color: var(--ao-green); }
+        .exec-status.dry_run { background: rgba(0, 212, 255, 0.15); color: var(--ao-cyan); }
+
+        .risk-bars {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .risk-bar {
+            display: grid;
+            grid-template-columns: 70px 1fr 40px;
+            gap: 10px;
+            align-items: center;
+        }
+        .risk-label {
+            font-size: 11px;
+            color: var(--ao-muted);
+        }
+        .risk-track {
+            height: 6px;
+            background: var(--ao-border);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .risk-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+        .risk-fill.safe { background: var(--ao-green); }
+        .risk-fill.low { background: var(--ao-blue); }
+        .risk-fill.medium { background: #fbbf24; }
+        .risk-fill.high { background: #f97316; }
+        .risk-fill.critical { background: var(--ao-danger); }
+        .risk-value {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--ao-text);
+            text-align: right;
+        }
+
+        @media (max-width: 768px) {
+            .status-grid { grid-template-columns: repeat(2, 1fr); }
+            .dashboard-grid { grid-template-columns: 1fr; }
+            .task-item { grid-template-columns: 60px 1fr auto; }
+            .info-grid { grid-template-columns: 1fr; }
+        }
+    '''
+
+    return render_layout("AgentOS Super Dashboard", "dashboard-v2", content, extra_css)
 
 
 @app.get("/control", response_class=HTMLResponse)

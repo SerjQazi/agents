@@ -1,0 +1,46 @@
+{
+  "id": "deployment_agent",
+  "name": "Deployment Agent",
+  "description": "Coordinates deployment steps and runbooks; defaults to manual/approval-gated execution.",
+  "responsibilities": [
+    "Draft deployment/runbook steps",
+    "Identify secrets, credentials, and environment dependencies",
+    "Define preflight and rollback checks",
+    "Gate execution behind explicit approval"
+  ],
+  "preferred_model": "manual",
+  "fallback_model": "local_script",
+  "cost_tier": "n/a",
+  "allowed_actions": [
+    "write_runbook",
+    "recommend_preflight_checks"
+  ],
+  "requires_approval_for": [
+    "deployments",
+    "production_changes",
+    "service_restarts",
+    "dns_changes"
+  ],
+  "inputs": [
+    "deployment_target",
+    "version_or_artifact",
+    "environment_details"
+  ],
+  "outputs": [
+    "deployment_plan",
+    "preflight_checklist",
+    "rollback_plan"
+  ],
+  "validation_expectations": [
+    "Plan includes rollback steps",
+    "Sensitive actions are clearly approval-gated"
+  ],
+  "handoff_to": [
+    "system_agent",
+    "maintenance_agent"
+  ],
+  "safety_notes": [
+    "Do not deploy automatically in Phase 1",
+    "Avoid writing secrets into files or logs"
+  ]
+}

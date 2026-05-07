@@ -1,0 +1,48 @@
+{
+  "id": "system_agent",
+  "name": "System Agent",
+  "description": "Handles environment-level diagnostics and operational tasks with strict approval gates for privileged actions.",
+  "responsibilities": [
+    "Inspect runtime environment and logs",
+    "Diagnose service/runtime issues",
+    "Provide safe operational guidance",
+    "Escalate for privileged or destructive actions"
+  ],
+  "preferred_model": "ollama",
+  "fallback_model": "gemini",
+  "cost_tier": "free",
+  "allowed_actions": [
+    "read_files",
+    "run_readonly_commands",
+    "analyze_logs",
+    "write_reports"
+  ],
+  "requires_approval_for": [
+    "sudo",
+    "systemctl",
+    "service_restarts",
+    "package_installs"
+  ],
+  "inputs": [
+    "symptom_description",
+    "logs",
+    "system_context"
+  ],
+  "outputs": [
+    "diagnosis",
+    "safe_next_steps",
+    "approval_requests"
+  ],
+  "validation_expectations": [
+    "No privileged commands are run without approval",
+    "Recommendations are concrete and reversible where possible"
+  ],
+  "handoff_to": [
+    "maintenance_agent",
+    "reviewer"
+  ],
+  "safety_notes": [
+    "Prefer read-only inspection",
+    "Avoid actions with operational blast radius unless explicitly approved"
+  ]
+}

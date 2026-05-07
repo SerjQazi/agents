@@ -5,6 +5,13 @@ REPO_DIR="/home/agentzero/agents"
 
 cd "$REPO_DIR"
 
+echo "Deprecated: scripts/push-to-git.sh"
+echo "This script used to stage/commit/push automatically."
+echo "New workflow: ./scripts/git_helper.sh commit-safe (or commit-backend), then ./scripts/git_helper.sh push-approved"
+echo
+echo "Refusing to run to prevent accidental pushes."
+exit 1
+
 branch="$(git rev-parse --abbrev-ref HEAD)"
 if [[ "$branch" == "HEAD" ]]; then
   echo "Error: detached HEAD; switch to a branch before pushing" >&2
