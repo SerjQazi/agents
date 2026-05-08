@@ -1,6 +1,7 @@
 """FastAPI backend for the local multi-agent dashboard."""
 
 import html
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -23,7 +25,19 @@ from core.agent_core.config import settings
 from core.agent_core.controller import AgentController
 from core.agent_core.self_healing_agent import SelfHealingAgent
 from core.agent_core.system_watcher import SystemWatcher
-from apps.shared_layout import layout_css, render_layout # layout_css is likely unused in app.py now, but kept for historical
+from apps.shared_layout import layout_css, render_layout
+
+# AGENTOS ANALYZE UPLOAD START
+# Import scanner from builder_agent for read-only FiveM script analysis
+try:
+    from apps.builder_agent.scanner import ScriptScanner
+    from apps.builder_agent.config import PlannerConfig
+    BUILDER_SCANNER_AVAILABLE = True
+except ImportError:
+    BUILDER_SCANNER_AVAILABLE = False
+    ScriptScanner = None
+    PlannerConfig = None
+# AGENTOS ANALYZE UPLOAD END
 
 
 app = FastAPI(title=settings.app_name)
@@ -1234,7 +1248,6 @@ def dashboard() -> str:
         <title>AgentOS Dashboard</title>
         <style>
           """ + layout_css() + """
-          """ + layout_css() + """
           :root {
             color-scheme: dark;
             --bg: #050914;
@@ -2417,7 +2430,7 @@ def dashboard() -> str:
           <main class="shell main-panel">
           <header class="hero glass">
             <div>
-              <h1>AgentOS Dashboard</h1>
+              <h1>AgentOS Dashboard <span class="home-badge">Home</span></h1>
               <p class="subtitle">AgentOS Agent control and system monitor</p>
               <p class="hostname">Host: <span id="hero-hostname">--</span></p>
             </div>
@@ -2851,11 +2864,14 @@ def super_dashboard() -> str:
     fivem_server_path = _detect_fivem_server_path()
     analysis_exists = _analysis_artifacts_exist()
     next_action = _next_recommended_action(incoming_path, incoming_entries_count, analysis_exists)
+    # AGENTOS INCOMING RESOURCE QUEUE START
+    incoming_resources = _get_incoming_resources_with_analysis(limit=15)
+    incoming_resources_json = json.dumps(incoming_resources)
+    # AGENTOS INCOMING RESOURCE QUEUE END
     # AGENTOS FIVEM CONTROL CENTER END
 
     try:
         import sys
-        import json
         sys.path.insert(0, "/home/agentzero/agents")
         from orchestrator.store import TaskStore
         from orchestrator.recovery import RecoveryManager
@@ -2927,6 +2943,7 @@ def super_dashboard() -> str:
                         })
 
         approvals_data = rm.get_pending_approvals()
+        approvals_data.extend(_staging_approval_entries(limit=20))
 
         try:
             orch = Orchestrator(store=store, dry_run_default=True)
@@ -2938,6 +2955,7 @@ def super_dashboard() -> str:
 
     except Exception as e:
         orchestrator_available = False
+        approvals_data = _staging_approval_entries(limit=20)
 
     active_tasks_html = ""
     for task in tasks_data["active"][:5]:
@@ -3087,6 +3105,14 @@ def super_dashboard() -> str:
             <h3>Next Recommended Action</h3>
             <p>{html.escape(next_action)}</p>
         </div>
+    </section>
+
+    <section class="section incoming-queue-section" id="incoming-queue">
+        <h2><span class="section-icon">📥</span>Incoming Resource Queue</h2>
+        <div class="incoming-queue-loading" id="incoming-queue-loading">Loading incoming resources...</div>
+        <div class="incoming-queue-error" id="incoming-queue-error" style="display:none;">Failed to load resources</div>
+        <div class="incoming-queue-empty" id="incoming-queue-empty" style="display:none;">No incoming resources found</div>
+        <div class="incoming-queue-list" id="incoming-queue-list"></div>
     </section>
 
     <section class="status-grid">
@@ -3256,6 +3282,22 @@ def super_dashboard() -> str:
         <h2><span class="section-icon">🩺</span>AgentOS Health Check</h2>
         <button class="health-check-button" type="button" onclick="runHealthCheckDashboardV2Task()">Run AgentOS Health Check</button>
     </section>
+
+    <div class="doc-modal-overlay" id="doc-modal-overlay" aria-hidden="true">
+        <div class="doc-modal" role="dialog" aria-modal="true" aria-labelledby="doc-modal-title">
+            <div class="doc-modal-header">
+                <div>
+                    <h3 id="doc-modal-title" class="doc-modal-title">Document</h3>
+                    <p id="doc-modal-meta" class="doc-modal-meta">Ready</p>
+                </div>
+                <div class="doc-modal-actions">
+                    <button class="button secondary" type="button" id="doc-modal-copy-btn">Copy</button>
+                    <button class="button secondary" type="button" id="doc-modal-close-btn" aria-label="Close">X</button>
+                </div>
+            </div>
+            <pre id="doc-modal-content" class="doc-modal-content"></pre>
+        </div>
+    </div>
     '''
 
     extra_css = '''
@@ -3627,6 +3669,162 @@ def super_dashboard() -> str:
             text-align: right;
         }
 
+        .incoming-queue-section {
+            margin-top: 20px;
+        }
+        .incoming-queue-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            max-height: 500px;
+            overflow-y: auto;
+            padding: 4px;
+        }
+        .incoming-resource-item {
+            border: 1px solid var(--ao-border);
+            border-radius: 8px;
+            padding: 12px;
+            background: rgba(2, 6, 23, 0.4);
+        }
+        .resource-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+        .resource-name {
+            font-weight: 600;
+            color: var(--ao-text);
+            font-size: 14px;
+        }
+        .resource-manifest {
+            font-size: 11px;
+            color: var(--ao-soft);
+            padding: 2px 6px;
+            background: rgba(125, 211, 252, 0.1);
+            border-radius: 4px;
+        }
+        .resource-status {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            margin-left: auto;
+        }
+        .resource-status.analyzed {
+            background: rgba(55, 214, 122, 0.15);
+            color: var(--ao-green);
+        }
+        .resource-status.not-analyzed {
+            background: rgba(251, 191, 36, 0.15);
+            color: #fbbf24;
+        }
+        .resource-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+        .staging-badge {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            border: 1px solid transparent;
+        }
+        .staging-badge.staged { background: rgba(96, 165, 250, 0.16); color: #93c5fd; border-color: rgba(96, 165, 250, 0.26); }
+        .staging-badge.ready { background: rgba(16, 185, 129, 0.16); color: #6ee7b7; border-color: rgba(16, 185, 129, 0.26); }
+        .staging-badge.modified { background: rgba(251, 191, 36, 0.16); color: #fcd34d; border-color: rgba(251, 191, 36, 0.3); }
+        .staging-badge.approved { background: rgba(34, 197, 94, 0.2); color: #86efac; border-color: rgba(34, 197, 94, 0.3); }
+        .staging-badge.rejected { background: rgba(248, 113, 113, 0.16); color: #fca5a5; border-color: rgba(248, 113, 113, 0.32); }
+        .analysis-badge {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            background: rgba(0, 212, 255, 0.12);
+            color: var(--ao-cyan);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+        }
+        .analysis-badge.framework { background: rgba(167, 139, 250, 0.12); color: #a78bfa; border-color: rgba(167, 139, 250, 0.2); }
+        .analysis-badge.inventory { background: rgba(52, 211, 153, 0.12); color: #34d399; border-color: rgba(52, 211, 153, 0.2); }
+        .analysis-badge.target { background: rgba(251, 191, 36, 0.12); color: #fbbf24; border-color: rgba(251, 191, 36, 0.2); }
+        .analysis-badge.database { background: rgba(96, 165, 250, 0.12); color: #60a5fa; border-color: rgba(96, 165, 250, 0.2); }
+        .analysis-badge.risk { background: rgba(255, 99, 112, 0.12); border-color: rgba(255, 99, 112, 0.2); }
+        .resource-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .analyze-btn {
+            font-size: 12px;
+            padding: 6px 12px;
+            background: rgba(0, 212, 255, 0.15);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+        }
+        .incoming-queue-loading, .incoming-queue-error, .incoming-queue-empty {
+            padding: 20px;
+            text-align: center;
+            color: var(--ao-muted);
+        }
+        .incoming-queue-error { color: var(--ao-danger); }
+        .doc-modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(2, 6, 23, 0.82);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+            padding: 20px;
+        }
+        .doc-modal-overlay.open {
+            display: flex;
+        }
+        .doc-modal {
+            width: min(1040px, 96vw);
+            max-height: 90vh;
+            background: #090f1d;
+            border: 1px solid var(--ao-border);
+            border-radius: 10px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+            display: flex;
+            flex-direction: column;
+        }
+        .doc-modal-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--ao-border);
+            gap: 12px;
+        }
+        .doc-modal-title {
+            margin: 0;
+            font-size: 15px;
+            color: var(--ao-text);
+        }
+        .doc-modal-meta {
+            margin: 4px 0 0;
+            font-size: 11px;
+            color: var(--ao-soft);
+        }
+        .doc-modal-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .doc-modal-content {
+            margin: 0;
+            padding: 14px;
+            overflow: auto;
+            max-height: 72vh;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.45;
+            color: #e7edf8;
+            background: transparent;
+        }
+
         @media (max-width: 768px) {
             .status-grid { grid-template-columns: repeat(2, 1fr); }
             .dashboard-grid { grid-template-columns: 1fr; }
@@ -3638,6 +3836,7 @@ def super_dashboard() -> str:
     '''
 
     extra_js = '''
+        <script>
         async function runHealthCheckDashboardV2Task() {
             const response = await fetch("/dashboard-v2/tasks/health-check", { method: "POST" });
             if (!response.ok) {
@@ -3646,6 +3845,527 @@ def super_dashboard() -> str:
             }
             window.location.reload();
         }
+
+        const incomingResourcesData = ''' + incoming_resources_json + ''';
+        const ANALYSIS_ACTION_LABELS = {
+            "safe": "Ready for staging",
+            "manual-sql": "SQL needs review",
+            "review-required": "Risk - review needed",
+            "adaptation-needed": "Adaptation needed",
+        };
+
+        function escapeHtml(value) {
+            return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+        }
+
+        function getDocModalNodes() {
+            return {
+                overlay: document.getElementById("doc-modal-overlay"),
+                title: document.getElementById("doc-modal-title"),
+                meta: document.getElementById("doc-modal-meta"),
+                content: document.getElementById("doc-modal-content"),
+                copyBtn: document.getElementById("doc-modal-copy-btn"),
+                closeBtn: document.getElementById("doc-modal-close-btn"),
+            };
+        }
+
+        function closeDocumentModal() {
+            const nodes = getDocModalNodes();
+            if (!nodes.overlay) return;
+            nodes.overlay.classList.remove("open");
+            nodes.overlay.setAttribute("aria-hidden", "true");
+        }
+
+        function openDocumentModal(title, meta, contentText) {
+            const nodes = getDocModalNodes();
+            if (!nodes.overlay || !nodes.title || !nodes.meta || !nodes.content || !nodes.copyBtn) return;
+            nodes.title.textContent = title || "Document";
+            nodes.meta.textContent = meta || "";
+            nodes.content.textContent = contentText || "";
+            nodes.overlay.classList.add("open");
+            nodes.overlay.setAttribute("aria-hidden", "false");
+            nodes.copyBtn.onclick = () => {
+                const text = nodes.content.textContent || "";
+                navigator.clipboard.writeText(text).then(() => {
+                    alert("Copied.");
+                }).catch(() => {
+                    alert("Copy failed.");
+                });
+            };
+            nodes.content.scrollTop = 0;
+        }
+
+        function wireDocumentModalBehavior() {
+            const nodes = getDocModalNodes();
+            if (!nodes.overlay || !nodes.closeBtn) return;
+            nodes.closeBtn.addEventListener("click", closeDocumentModal);
+            nodes.overlay.addEventListener("click", (event) => {
+                if (event.target === nodes.overlay) {
+                    closeDocumentModal();
+                }
+            });
+            document.addEventListener("keydown", (event) => {
+                if (event.key === "Escape" && nodes.overlay.classList.contains("open")) {
+                    closeDocumentModal();
+                }
+            });
+        }
+
+        async function openPatchPlanModal(scriptName) {
+            const response = await fetch("/api/analysis/" + encodeURIComponent(scriptName) + "/patch-plan/md", { method: "GET" });
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.detail || body.error || "Patch plan not found");
+            const markdown = body.content || "No patch plan content.";
+            openDocumentModal("Patch Plan", "Resource: " + scriptName, markdown);
+        }
+
+        async function openPromptModal(promptType) {
+            const endpoint = promptType === "opencode" ? "/api/prompts/opencode-next" : "/api/prompts/codex-audit-next";
+            const title = promptType === "opencode" ? "OpenCode Prompt" : "Codex Audit Prompt";
+            const response = await fetch(endpoint, { method: "GET" });
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.detail || body.error || "Prompt not available");
+            const content = body.content || "";
+            const generatedAt = body.generated_at || "unknown";
+            openDocumentModal(title, "Generated: " + generatedAt, content);
+        }
+
+        function stagingDiffText(diff) {
+            const lines = [];
+            const safeDiff = diff || {};
+            const summary = safeDiff.summary || {};
+            lines.push("Resource: " + String(safeDiff.resource || "unknown"));
+            lines.push("Status: " + String(safeDiff.status || "UNKNOWN"));
+            lines.push("");
+            lines.push("Changed files (" + String(summary.changed || 0) + "):");
+            for (const p of (safeDiff.changed_files || [])) lines.push("  - " + p);
+            if (!(safeDiff.changed_files || []).length) lines.push("  - none");
+            lines.push("");
+            lines.push("Added files (" + String(summary.added || 0) + "):");
+            for (const p of (safeDiff.added_files || [])) lines.push("  - " + p);
+            if (!(safeDiff.added_files || []).length) lines.push("  - none");
+            lines.push("");
+            lines.push("Deleted files (" + String(summary.deleted || 0) + "):");
+            for (const p of (safeDiff.deleted_files || [])) lines.push("  - " + p);
+            if (!(safeDiff.deleted_files || []).length) lines.push("  - none");
+            return lines.join("\\n");
+        }
+
+        async function refreshResourceCard(scriptName) {
+            try {
+                const response = await fetch("/api/incoming", { method: "GET" });
+                const body = await response.json();
+                if (!response.ok) return;
+                const incoming = body.incoming || [];
+                const match = incoming.find((item) => item && item.name === scriptName);
+                if (!match) return;
+                const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+                if (resource) {
+                    resource.staging = {
+                        exists: !!(match.staging_exists),
+                        status: String(match.staging_status || "NONE"),
+                        approved_at: match.staging_approved_at || null,
+                    };
+                }
+            } catch (_) {
+                // No-op refresh fallback: current page state remains usable.
+            }
+        }
+
+        function getRiskColor(risk) {
+            if (risk === "high") return "var(--ao-danger)";
+            if (risk === "medium") return "#fbbf24";
+            return "var(--ao-green)";
+        }
+
+        function getActionLabel(recommendedAction) {
+            return ANALYSIS_ACTION_LABELS[recommendedAction] || recommendedAction || "Ready";
+        }
+
+        function riskFromFindings(findings) {
+            let risk = "low";
+            for (const finding of (findings || [])) {
+                if (finding && finding.severity === "high") {
+                    risk = "high";
+                    break;
+                }
+                if (finding && finding.severity === "medium" && risk !== "high") {
+                    risk = "medium";
+                }
+            }
+            return risk;
+        }
+
+        function summaryBadgesHtml(summary) {
+            const safeSummary = summary || {};
+            const framework = safeSummary.framework || "standalone";
+            const inventory = safeSummary.inventory || "none";
+            const target = safeSummary.target || "none";
+            const database = safeSummary.database || "none";
+            const risk = safeSummary.risk || "low";
+
+            return `
+                <span class="analysis-badge framework">${escapeHtml(framework)}</span>
+                <span class="analysis-badge inventory">${escapeHtml(inventory)}</span>
+                <span class="analysis-badge target">${escapeHtml(target)}</span>
+                <span class="analysis-badge database">${escapeHtml(database)}</span>
+                <span class="analysis-badge risk" style="color:${getRiskColor(risk)}">Risk: ${escapeHtml(risk)}</span>
+            `;
+        }
+
+        function normalizedStageStatus(resource) {
+            const raw = String((resource && resource.staging && resource.staging.status) || "NONE").toUpperCase();
+            if (["STAGED", "READY", "MODIFIED", "APPROVED", "REJECTED"].includes(raw)) return raw;
+            return "NONE";
+        }
+
+        function stageBadgeHtml(resource) {
+            const status = normalizedStageStatus(resource);
+            if (status === "NONE") return "";
+            const cls = status.toLowerCase();
+            return `<span class="staging-badge ${cls}">${escapeHtml(status)}</span>`;
+        }
+
+        function postStageButtonsHtml(name) {
+            return `
+                <button class="button secondary view-staging-diff-btn" data-script="${escapeHtml(name)}">View Staging Diff</button>
+                <button class="button secondary approve-staging-btn" data-script="${escapeHtml(name)}">Approve For Apply</button>
+                <button class="button secondary delete-staging-btn" data-script="${escapeHtml(name)}">Delete Staging Copy</button>
+            `;
+        }
+
+        function summaryFromAnalysis(analysis) {
+            const markers = (analysis && analysis.markers) || {};
+            return {
+                framework: Object.keys(markers.framework || {}).join(", ") || "standalone",
+                inventory: Object.keys(markers.inventory || {}).join(", ") || "none",
+                target: Object.keys(markers.target || {}).join(", ") || "none",
+                database: Object.keys(markers.database || {}).join(", ") || "none",
+                risk: riskFromFindings(analysis && analysis.findings),
+            };
+        }
+
+        function findResourceItemByName(scriptName) {
+            const items = document.querySelectorAll(".incoming-resource-item");
+            for (const item of items) {
+                if ((item.dataset && item.dataset.name) === scriptName) {
+                    return item;
+                }
+            }
+            return null;
+        }
+
+        function renderIncomingResources() {
+            const container = document.getElementById("incoming-queue-list");
+            const loading = document.getElementById("incoming-queue-loading");
+            const empty = document.getElementById("incoming-queue-empty");
+
+            if (!incomingResourcesData || incomingResourcesData.length === 0) {
+                loading.style.display = "none";
+                empty.style.display = "block";
+                return;
+            }
+
+            loading.style.display = "none";
+
+            container.innerHTML = incomingResourcesData.map(resource => {
+                let badgesHtml = "";
+                if (resource.analyzed && resource.analysis) {
+                    badgesHtml = summaryBadgesHtml(summaryFromAnalysis(resource.analysis));
+                }
+                badgesHtml += stageBadgeHtml(resource);
+
+                const statusHtml = resource.analyzed
+                    ? `<span class="resource-status analyzed">Analyzed</span>`
+                    : `<span class="resource-status not-analyzed">Not analyzed yet</span>`;
+
+                const actionText = getActionLabel("safe");
+                const patchPlanActions = resource.analyzed
+                    ? `<button class="button secondary generate-plan-btn" data-script="${escapeHtml(resource.name)}">Generate Patch Plan</button>
+                       <button class="button secondary view-plan-btn" data-script="${escapeHtml(resource.name)}">View Patch Plan</button>`
+                    : "";
+                const promptActions = (resource.analyzed && resource.has_patch_plan)
+                    ? `<button class="button secondary generate-opencode-prompt-btn" data-script="${escapeHtml(resource.name)}">Generate OpenCode Prompt</button>
+                       <button class="button secondary view-opencode-prompt-btn" data-script="${escapeHtml(resource.name)}">View OpenCode Prompt</button>
+                       <button class="button secondary view-codex-prompt-btn" data-script="${escapeHtml(resource.name)}">View Codex Audit Prompt</button>`
+                    : "";
+                const stagingActions = resource.analyzed
+                    ? (resource.staging && resource.staging.exists
+                        ? postStageButtonsHtml(resource.name)
+                        : `<button class="button secondary stage-safe-copy-btn" data-script="${escapeHtml(resource.name)}">Stage Safe Copy</button>`)
+                    : "";
+
+                return `
+                    <div class="incoming-resource-item" data-name="${escapeHtml(resource.name)}">
+                        <div class="resource-header">
+                            <span class="resource-name">${escapeHtml(resource.name)}</span>
+                            <span class="resource-manifest">${escapeHtml(resource.manifest || "No manifest")}</span>
+                            ${statusHtml}
+                        </div>
+                        <div class="resource-badges">${badgesHtml}</div>
+                        <div class="resource-actions">
+                            <button class="button analyze-btn" data-script="${escapeHtml(resource.name)}">Analyze</button>
+                            ${resource.analyzed ? `<button class="button secondary view-report-btn" data-script="${escapeHtml(resource.name)}">View Report</button>` : ""}
+                            ${patchPlanActions}
+                            ${promptActions}
+                            ${stagingActions}
+                        </div>
+                    </div>
+                `;
+            }).join("");
+        }
+
+        async function analyzeResource(scriptName, button) {
+            const original = button.textContent;
+            button.disabled = true;
+            button.textContent = "Analyzing...";
+
+            try {
+                const response = await fetch("/api/incoming/" + encodeURIComponent(scriptName) + "/analyze", { method: "POST" });
+                const body = await response.json();
+
+                if (!response.ok) throw new Error(body.detail || body.error || "Analysis failed");
+
+                if (body.status === "success" && body.summary) {
+                    const s = body.summary;
+                    const actionText = getActionLabel(s.recommended_action);
+
+                    const item = findResourceItemByName(scriptName);
+                    if (item) {
+                        const badges = item.querySelector(".resource-badges");
+                        badges.innerHTML = summaryBadgesHtml(s) + `<span class="analysis-action">${escapeHtml(actionText)}</span>`;
+                        const status = item.querySelector(".resource-status");
+                        if (status) {
+                            status.className = "resource-status analyzed";
+                            status.textContent = "Analyzed";
+                        }
+
+                        const actions = item.querySelector(".resource-actions");
+                        const promptActions = resourceHasPatchPlan(scriptName)
+                            ? `<button class="button secondary generate-opencode-prompt-btn" data-script="${escapeHtml(scriptName)}">Generate OpenCode Prompt</button>
+                               <button class="button secondary view-opencode-prompt-btn" data-script="${escapeHtml(scriptName)}">View OpenCode Prompt</button>
+                               <button class="button secondary view-codex-prompt-btn" data-script="${escapeHtml(scriptName)}">View Codex Audit Prompt</button>`
+                            : "";
+                        const stageActions = resourceHasStaging(scriptName)
+                            ? postStageButtonsHtml(scriptName)
+                            : `<button class="button secondary stage-safe-copy-btn" data-script="${escapeHtml(scriptName)}">Stage Safe Copy</button>`;
+                        actions.innerHTML = `
+                            <button class="button secondary" disabled>Analyzed</button>
+                            <button class="button secondary view-report-btn" data-script="${escapeHtml(scriptName)}">View Report</button>
+                            <button class="button secondary generate-plan-btn" data-script="${escapeHtml(scriptName)}">Generate Patch Plan</button>
+                            <button class="button secondary view-plan-btn" data-script="${escapeHtml(scriptName)}">View Patch Plan</button>
+                            ${promptActions}
+                            ${stageActions}
+                        `;
+                    }
+                } else {
+                    throw new Error(body.error || "Analysis failed");
+                }
+            } catch (error) {
+                alert("Analysis failed: " + String(error.message || error));
+                button.textContent = original;
+                button.disabled = false;
+            }
+        }
+
+        document.addEventListener("click", function(event) {
+            const analyzeBtn = event.target.closest(".analyze-btn");
+            if (analyzeBtn) {
+                analyzeResource(analyzeBtn.dataset.script, analyzeBtn);
+                return;
+            }
+
+            const viewBtn = event.target.closest(".view-report-btn");
+            if (viewBtn) {
+                const scriptName = viewBtn.dataset.script;
+                window.location.href = "/dashboard-v2/report/" + encodeURIComponent(scriptName);
+                return;
+            }
+
+            const generatePlanBtn = event.target.closest(".generate-plan-btn");
+            if (generatePlanBtn) {
+                const scriptName = generatePlanBtn.dataset.script;
+                const original = generatePlanBtn.textContent;
+                generatePlanBtn.disabled = true;
+                generatePlanBtn.textContent = "Generating...";
+                fetch("/api/analysis/" + encodeURIComponent(scriptName) + "/generate-patch-plan", { method: "POST" })
+                    .then(async (response) => {
+                        const body = await response.json();
+                        if (!response.ok) throw new Error(body.detail || body.error || "Failed to generate patch plan");
+                        alert("Patch plan generated for " + scriptName);
+                        const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+                        if (resource) resource.has_patch_plan = true;
+                        const item = findResourceItemByName(scriptName);
+                        if (item) {
+                            const actions = item.querySelector(".resource-actions");
+                            if (actions && !actions.querySelector(".generate-opencode-prompt-btn")) {
+                                actions.insertAdjacentHTML(
+                                    "beforeend",
+                                    `<button class="button secondary generate-opencode-prompt-btn" data-script="${escapeHtml(scriptName)}">Generate OpenCode Prompt</button>
+                                     <button class="button secondary view-opencode-prompt-btn" data-script="${escapeHtml(scriptName)}">View OpenCode Prompt</button>
+                                     <button class="button secondary view-codex-prompt-btn" data-script="${escapeHtml(scriptName)}">View Codex Audit Prompt</button>`
+                                );
+                            }
+                        }
+                    })
+                    .catch((error) => {
+                        alert("Patch plan generation failed: " + String(error.message || error));
+                    })
+                    .finally(() => {
+                        generatePlanBtn.disabled = false;
+                        generatePlanBtn.textContent = original;
+                    });
+                return;
+            }
+
+            const viewPlanBtn = event.target.closest(".view-plan-btn");
+            if (viewPlanBtn) {
+                const scriptName = viewPlanBtn.dataset.script;
+                openPatchPlanModal(scriptName)
+                    .catch((error) => {
+                        alert("View patch plan failed: " + String(error.message || error));
+                    });
+                return;
+            }
+
+            const generatePromptBtn = event.target.closest(".generate-opencode-prompt-btn");
+            if (generatePromptBtn) {
+                const scriptName = generatePromptBtn.dataset.script;
+                const original = generatePromptBtn.textContent;
+                generatePromptBtn.disabled = true;
+                generatePromptBtn.textContent = "Generating...";
+                fetch("/api/patch-plan/" + encodeURIComponent(scriptName) + "/generate-opencode-prompt", { method: "POST" })
+                    .then(async (response) => {
+                        const body = await response.json();
+                        if (!response.ok) throw new Error(body.detail || body.error || "Failed to generate prompts");
+                        alert("OpenCode and Codex prompts generated for " + scriptName);
+                    })
+                    .catch((error) => {
+                        alert("Prompt generation failed: " + String(error.message || error));
+                    })
+                    .finally(() => {
+                        generatePromptBtn.disabled = false;
+                        generatePromptBtn.textContent = original;
+                    });
+                return;
+            }
+
+            const stageSafeCopyBtn = event.target.closest(".stage-safe-copy-btn");
+            if (stageSafeCopyBtn) {
+                const scriptName = stageSafeCopyBtn.dataset.script;
+                const original = stageSafeCopyBtn.textContent;
+                stageSafeCopyBtn.disabled = true;
+                stageSafeCopyBtn.textContent = "Staging...";
+                fetch("/api/staging/" + encodeURIComponent(scriptName) + "/create", { method: "POST" })
+                    .then(async (response) => {
+                        const body = await response.json();
+                        if (!response.ok) throw new Error(body.detail || body.error || "Failed to create staging copy");
+                        const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+                        if (resource) {
+                            resource.staging = { exists: true, status: String(body.staging_status || "STAGED"), approved_at: null };
+                        }
+                        renderIncomingResources();
+                    })
+                    .catch((error) => {
+                        alert("Stage Safe Copy failed: " + String(error.message || error));
+                    })
+                    .finally(() => {
+                        stageSafeCopyBtn.disabled = false;
+                        stageSafeCopyBtn.textContent = original;
+                    });
+                return;
+            }
+
+            const viewStagingDiffBtn = event.target.closest(".view-staging-diff-btn");
+            if (viewStagingDiffBtn) {
+                const scriptName = viewStagingDiffBtn.dataset.script;
+                fetch("/api/staging/" + encodeURIComponent(scriptName) + "/diff", { method: "GET" })
+                    .then(async (response) => {
+                        const body = await response.json();
+                        if (!response.ok) throw new Error(body.detail || body.error || "Failed to load staging diff");
+                        const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+                        if (resource && resource.staging) {
+                            resource.staging.status = String(body.status || resource.staging.status || "READY");
+                        }
+                        openDocumentModal("Staging Diff", "Resource: " + scriptName, stagingDiffText(body));
+                        renderIncomingResources();
+                    })
+                    .catch((error) => {
+                        alert("View staging diff failed: " + String(error.message || error));
+                    });
+                return;
+            }
+
+            const approveStagingBtn = event.target.closest(".approve-staging-btn");
+            if (approveStagingBtn) {
+                const scriptName = approveStagingBtn.dataset.script;
+                fetch("/api/staging/" + encodeURIComponent(scriptName) + "/approve", { method: "POST" })
+                    .then(async (response) => {
+                        const body = await response.json();
+                        if (!response.ok) throw new Error(body.detail || body.error || "Approval failed");
+                        const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+                        if (resource) {
+                            resource.staging = resource.staging || {};
+                            resource.staging.exists = true;
+                            resource.staging.status = "APPROVED";
+                            resource.staging.approved_at = body.approved_at || null;
+                        }
+                        renderIncomingResources();
+                    })
+                    .catch((error) => {
+                        alert("Approve staging failed: " + String(error.message || error));
+                    });
+                return;
+            }
+
+            const deleteStagingBtn = event.target.closest(".delete-staging-btn");
+            if (deleteStagingBtn) {
+                const scriptName = deleteStagingBtn.dataset.script;
+                fetch("/api/staging/" + encodeURIComponent(scriptName), { method: "DELETE" })
+                    .then(async (response) => {
+                        const body = await response.json();
+                        if (!response.ok) throw new Error(body.detail || body.error || "Delete staging failed");
+                        const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+                        if (resource) {
+                            resource.staging = { exists: false, status: "NONE", approved_at: null };
+                        }
+                        renderIncomingResources();
+                    })
+                    .catch((error) => {
+                        alert("Delete staging copy failed: " + String(error.message || error));
+                    });
+                return;
+            }
+
+            const viewOpenCodePromptBtn = event.target.closest(".view-opencode-prompt-btn");
+            if (viewOpenCodePromptBtn) {
+                openPromptModal("opencode").catch((error) => {
+                    alert("View OpenCode prompt failed: " + String(error.message || error));
+                });
+                return;
+            }
+
+            const viewCodexPromptBtn = event.target.closest(".view-codex-prompt-btn");
+            if (viewCodexPromptBtn) {
+                openPromptModal("codex").catch((error) => {
+                    alert("View Codex prompt failed: " + String(error.message || error));
+                });
+            }
+        });
+
+        function resourceHasPatchPlan(scriptName) {
+            const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+            return !!(resource && resource.has_patch_plan);
+        }
+
+        function resourceHasStaging(scriptName) {
+            const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+            return !!(resource && resource.staging && resource.staging.exists);
+        }
+
+        wireDocumentModalBehavior();
+        renderIncomingResources();
+        </script>
     '''
 
     return render_layout("AgentOS FiveM Control Center", "dashboard-v2", content, extra_css, extra_js)
@@ -3655,6 +4375,196 @@ def super_dashboard() -> str:
 def run_dashboard_v2_health_check() -> dict[str, Any]:
     # Built-in safe task trigger for Dashboard V2 end-to-end task verification.
     return run_dashboard_v2_health_check_task()
+
+
+@app.get("/dashboard-v2/report/{script_name}", response_class=HTMLResponse)
+def analysis_report_page(script_name: str) -> str:
+    """Render readable HTML analysis report page for an incoming script."""
+    safe_name = _safe_incoming_script_name(script_name)
+
+    reports_dir = BASE_DIR / "reports" / "analysis"
+    if not reports_dir.is_dir():
+        return render_layout(
+            "Analysis Report - Not Found",
+            "dashboard-v2",
+            f"""
+            <section class="ao-card">
+                <h2>Analysis Report Not Found</h2>
+                <p>No analysis reports directory found.</p>
+                <p>Script: {esc(safe_name)}</p>
+                <div class="index-actions">
+                    <a class="button" href="/dashboard-v2">Back to Dashboard V2</a>
+                </div>
+            </section>
+            """,
+            subtitle=f"Report for {safe_name}"
+        )
+
+    reports = sorted(
+        reports_dir.glob(f"analysis-{safe_name}-*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    if not reports:
+        return render_layout(
+            "Analysis Report - Not Found",
+            "dashboard-v2",
+            f"""
+            <section class="ao-card">
+                <h2>Analysis Report Not Found</h2>
+                <p>No analysis has been performed for this script yet.</p>
+                <p>Script: {esc(safe_name)}</p>
+                <div class="index-actions">
+                    <a class="button" href="/dashboard-v2">Back to Dashboard V2</a>
+                </div>
+            </section>
+            """,
+            subtitle=f"Report for {safe_name}"
+        )
+
+    try:
+        report = json.loads(reports[0].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return render_layout(
+            "Analysis Report - Error",
+            "dashboard-v2",
+            f"""
+            <section class="ao-card">
+                <h2>Error Reading Report</h2>
+                <p>Failed to parse analysis report: {esc(str(e))}</p>
+                <div class="index-actions">
+                    <a class="button" href="/dashboard-v2">Back to Dashboard V2</a>
+                </div>
+            </section>
+            """,
+            subtitle=f"Report for {safe_name}"
+        )
+
+    analysis = report.get("full_analysis", {})
+    summary = _generate_analysis_summary(analysis)
+    framework = str(summary.get("framework", "standalone"))
+    inventory = str(summary.get("inventory", "none"))
+    target = str(summary.get("target", "none"))
+    database = str(summary.get("database", "none"))
+    risk_level = str(summary.get("risk", "low"))
+    recommended = str(summary.get("recommended_action", "safe"))
+
+    findings = analysis.get("findings", [])
+
+    risk_color = "var(--ao-green)" if risk_level == "low" else "#fbbf24" if risk_level == "medium" else "var(--ao-danger)"
+    recommended_text = {
+        "safe": "Ready for staging",
+        "manual-sql": "SQL requires manual review before staging",
+        "review-required": "Risk detected - manual review required",
+        "adaptation-needed": "Framework adaptation required for QBCore"
+    }.get(recommended, recommended)
+
+    findings_html = ""
+    for f in findings:
+        # Keep CSS class constrained to known values; escape user-controlled display fields.
+        severity_raw = str(f.get("severity", "info")).lower()
+        severity_class = severity_raw if severity_raw in {"high", "medium", "warning", "info"} else "info"
+        severity_label = severity_raw.upper()
+        category = str(f.get("category", "unknown"))
+        findings_html += f"""
+        <div class="finding-item {severity_class}">
+            <span class="finding-severity">{esc(severity_label)}</span>
+            <span class="finding-category">[{esc(category)}]</span>
+            <span class="finding-message">{esc(f.get("message", ""))}</span>
+        </div>
+        """
+
+    dependencies = analysis.get("dependencies", [])
+    deps_html = "".join(f"<li>{esc(d)}</li>" for d in dependencies) if dependencies else "<li>No dependencies detected</li>"
+
+    sql_files = analysis.get("sql_files", [])
+    sql_html = "".join(f"<li>{esc(f)}</li>" for f in sql_files) if sql_files else "<li>No SQL files detected</li>"
+
+    content = f"""
+    <section class="ao-card">
+        <div class="report-header">
+            <h2>Analysis Report: {esc(safe_name)}</h2>
+            <p class="report-meta">Analyzed: {esc(report.get("analyzed_at", "unknown"))}</p>
+        </div>
+
+        <div class="report-badges">
+            <span class="badge framework">{esc(framework)}</span>
+            <span class="badge inventory">{esc(inventory)}</span>
+            <span class="badge target">{esc(target)}</span>
+            <span class="badge database">{esc(database)}</span>
+            <span class="badge risk" style="background:{risk_color}20;color:{risk_color};border-color:{risk_color}">Risk: {esc(risk_level)}</span>
+        </div>
+
+        <div class="report-section">
+            <h3>Recommended Action</h3>
+            <p class="recommended-action">{esc(recommended_text)}</p>
+        </div>
+
+        <div class="report-section">
+            <h3>Dependencies</h3>
+            <ul class="report-list">{deps_html}</ul>
+        </div>
+
+        <div class="report-section">
+            <h3>SQL Files</h3>
+            <ul class="report-list">{sql_html}</ul>
+        </div>
+
+        <div class="report-section">
+            <h3>Findings ({len(findings)})</h3>
+            <div class="findings-list">{findings_html}</div>
+        </div>
+
+        <div class="report-section">
+            <h3>Files Scanned</h3>
+            <p>{report.get("files_count", len(analysis.get("files", [])))} files scanned</p>
+        </div>
+
+        <div class="report-actions">
+            <a class="button" href="/dashboard-v2">Back to Dashboard V2</a>
+            <a class="button secondary" href="/upload">Upload New Script</a>
+        </div>
+    </section>
+
+    <style>
+        .report-header {{ margin-bottom: 20px; }}
+        .report-header h2 {{ margin: 0 0 8px; }}
+        .report-meta {{ color: var(--ao-muted); font-size: 13px; }}
+        .report-badges {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }}
+        .badge {{ padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 700; border: 1px solid; }}
+        .badge.framework {{ background: rgba(167, 139, 250, 0.15); color: #a78bfa; border-color: rgba(167, 139, 250, 0.3); }}
+        .badge.inventory {{ background: rgba(52, 211, 153, 0.15); color: #34d399; border-color: rgba(52, 211, 153, 0.3); }}
+        .badge.target {{ background: rgba(251, 191, 36, 0.15); color: #fbbf24; border-color: rgba(251, 191, 36, 0.3); }}
+        .badge.database {{ background: rgba(96, 165, 250, 0.15); color: #60a5fa; border-color: rgba(96, 165, 250, 0.3); }}
+        .badge.risk {{ border-width: 2px; }}
+        .report-section {{ margin-bottom: 24px; padding: 16px; background: rgba(2, 6, 23, 0.3); border-radius: 8px; }}
+        .report-section h3 {{ margin: 0 0 12px; font-size: 15px; color: var(--ao-cyan); }}
+        .report-list {{ list-style: none; padding: 0; margin: 0; }}
+        .report-list li {{ padding: 4px 0; color: var(--ao-muted); font-size: 13px; }}
+        .recommended-action {{ font-size: 14px; font-weight: 600; color: var(--ao-text); }}
+        .findings-list {{ display: flex; flex-direction: column; gap: 8px; }}
+        .finding-item {{ padding: 10px; border-radius: 6px; background: rgba(2, 6, 23, 0.4); font-size: 13px; }}
+        .finding-item.high {{ border-left: 3px solid var(--ao-danger); }}
+        .finding-item.medium {{ border-left: 3px solid #fbbf24; }}
+        .finding-item.warning {{ border-left: 3px solid #fbbf24; }}
+        .finding-item.info {{ border-left: 3px solid var(--ao-cyan); }}
+        .finding-severity {{ font-weight: 700; margin-right: 8px; }}
+        .finding-item.high .finding-severity {{ color: var(--ao-danger); }}
+        .finding-item.medium .finding-severity, .finding-item.warning .finding-severity {{ color: #fbbf24; }}
+        .finding-item.info .finding-severity {{ color: var(--ao-cyan); }}
+        .finding-category {{ color: var(--ao-soft); margin-right: 8px; }}
+        .finding-message {{ color: var(--ao-muted); }}
+        .report-actions {{ display: flex; gap: 12px; margin-top: 24px; }}
+    </style>
+    """
+
+    return render_layout(
+        f"Analysis Report - {safe_name}",
+        "dashboard-v2",
+        content,
+        subtitle=f"Report for {safe_name}"
+    )
 
 
 @app.get("/control", response_class=HTMLResponse)
@@ -5464,6 +6374,117 @@ def app_view_html(title: str, active: str, content: str, script: str = "", subti
         background: rgba(2, 6, 23, 0.48);
         color: var(--ao-text);
         outline: none;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 14px;
+      }
+
+      .terminal-container {
+        display: grid;
+        gap: 0;
+        border: 1px solid var(--ao-border-strong);
+        border-radius: 12px;
+        overflow: hidden;
+        background: rgba(2, 6, 23, 0.5);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+      }
+
+      .terminal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 14px;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
+        border-bottom: 1px solid var(--ao-border);
+      }
+
+      .terminal-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--ao-text);
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .terminal-icon {
+        color: var(--ao-cyan);
+        font-size: 16px;
+      }
+
+      .terminal-dots {
+        display: flex;
+        gap: 6px;
+      }
+
+      .terminal-dots span {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--ao-soft);
+      }
+
+      .terminal-dots span:first-child { background: #ff5f56; }
+      .terminal-dots span:nth-child(2) { background: #ffbd2e; }
+      .terminal-dots span:nth-child(3) { background: #27c93f; }
+
+      .terminal-body {
+        padding: 16px;
+      }
+
+      .terminal-body .command-form {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        background: rgba(2, 6, 23, 0.6);
+        border: 1px solid var(--ao-border);
+        border-radius: 8px;
+        padding: 8px 12px;
+      }
+
+      .terminal-prompt {
+        color: var(--ao-cyan);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 15px;
+        font-weight: 700;
+      }
+
+      .terminal-body .command-input {
+        border: none;
+        background: transparent;
+        min-height: 36px;
+        padding: 0 8px;
+      }
+
+      .terminal-run {
+        min-height: 36px;
+        padding: 0 14px;
+        font-size: 13px;
+      }
+
+      .terminal-output-wrapper {
+        margin-top: 14px;
+        border: 1px solid var(--ao-border);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      .terminal-output {
+        padding: 14px;
+        background: rgba(2, 6, 23, 0.7);
+        color: var(--ao-muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        line-height: 1.5;
+        min-height: 120px;
+        max-height: 400px;
+        overflow-y: auto;
+      }
+
+      .examples-label {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--ao-soft);
+        font-size: 12px;
       }
 
       .command-output,
@@ -5493,6 +6514,78 @@ def app_view_html(title: str, active: str, content: str, script: str = "", subti
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         font-size: 12px;
         line-height: 1.55;
+      }
+
+      .logs-container {
+        display: grid;
+        gap: 12px;
+      }
+
+      .logs-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 16px;
+        border: 1px solid var(--ao-border);
+        border-radius: 10px;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
+      }
+
+      .logs-title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--ao-text);
+        font-size: 16px;
+        font-weight: 600;
+      }
+
+      .logs-icon {
+        font-size: 18px;
+      }
+
+      .logs-badge {
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: rgba(0, 212, 255, 0.15);
+        color: var(--ao-cyan);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .logs-status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--ao-soft);
+        font-size: 13px;
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--ao-green);
+        animation: pulse 2s infinite;
+      }
+
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+      }
+
+      .logs-footer {
+        display: flex;
+        justify-content: space-between;
+        padding: 8px 4px;
+        color: var(--ao-soft);
+        font-size: 12px;
+      }
+
+      .logs-info {
+        display: flex;
+        align-items: center;
+        gap: 6px;
       }
 
       .log-line {
@@ -5701,18 +6794,30 @@ def app_view_html(title: str, active: str, content: str, script: str = "", subti
 @app.get("/commands", response_class=HTMLResponse)
 def commands_page() -> str:
     content = """
-      <section class="command-card glass" aria-label="Command workspace">
-        <div class="card-header">
-          <span class="icon"><svg viewBox="0 0 24 24"><path d="M4 7h16M7 7v10M17 7v10M4 17h16"></path></svg></span>
-          Commands
+      <div class="terminal-container">
+        <div class="terminal-header">
+          <span class="terminal-title"><span class="terminal-icon">❯</span> Command Center</span>
+          <span class="terminal-dots"><span></span><span></span><span></span></span>
         </div>
-        <form class="command-form" id="command-form">
-          <input class="command-input" id="command-input" type="text" placeholder="Type a command..." autocomplete="off">
-          <button class="button" type="submit">Run</button>
-        </form>
-        <div class="examples" id="command-examples"><button class="button secondary" type="button" data-command="/system health">/system health</button> <button class="button secondary" type="button" data-command="/git status">/git status</button> <button class="button secondary" type="button" data-command="/git push message">/git push message</button> <button class="button secondary" type="button" data-command="/git branch feature/name">/git branch feature/name</button> <button class="button secondary" type="button" data-command="/code plan request">/code plan request</button></div>
-        <div class="command-output" id="command-output" aria-live="polite">Command response will appear here.</div>
-      </section>
+        <section class="terminal-body glass" aria-label="Command workspace">
+          <form class="command-form" id="command-form">
+            <span class="terminal-prompt">$</span>
+            <input class="command-input" id="command-input" type="text" placeholder="Type a command..." autocomplete="off">
+            <button class="button terminal-run" type="submit">Run</button>
+          </form>
+          <div class="examples" id="command-examples">
+            <span class="examples-label">Quick commands:</span>
+            <button class="button secondary" type="button" data-command="/system health">/system health</button>
+            <button class="button secondary" type="button" data-command="/git status">/git status</button>
+            <button class="button secondary" type="button" data-command="/git push message">/git push message</button>
+            <button class="button secondary" type="button" data-command="/git branch feature/name">/git branch</button>
+            <button class="button secondary" type="button" data-command="/code plan request">/code plan</button>
+          </div>
+          <div class="terminal-output-wrapper">
+            <div class="terminal-output" id="command-output" aria-live="polite">Command response will appear here.</div>
+          </div>
+        </section>
+      </div>
     """
     script = """
       <script>
@@ -6270,15 +7375,21 @@ def ops_cheat_sheet_page() -> str:
         }}
       </style>
 
-      <section class="ops-hero glass" aria-label="Ops cheat sheet header">
-        <div class="ops-title-row">
-          <div>
-            <div class="ops-eyebrow">Runbook</div>
-            <h1>Ops Cheat Sheet</h1>
-            <p>Quick-reference commands for services, agents, Git, and troubleshooting.</p>
-          </div>
-          <div class="ops-meta" id="ops-count">0 commands</div>
+      <div class="terminal-container">
+        <div class="terminal-header">
+          <span class="terminal-title"><span class="terminal-icon">⚡</span> Ops Command Center</span>
+          <span class="terminal-dots"><span></span><span></span><span></span></span>
         </div>
+        <div class="terminal-body">
+          <section class="ops-hero glass" aria-label="Ops cheat sheet header">
+            <div class="ops-title-row">
+              <div>
+                <div class="ops-eyebrow">Runbook</div>
+                <h1>Ops Cheat Sheet</h1>
+                <p>Quick-reference commands for services, agents, Git, and troubleshooting.</p>
+              </div>
+              <div class="ops-meta" id="ops-count">0 commands</div>
+            </div>
         <div class="ops-search-wrap">
           <input class="ops-search" id="ops-search" type="search" placeholder="Filter commands, paths, services, or notes..." autocomplete="off">
           <div class="ops-chips" aria-label="Command categories">
@@ -6301,6 +7412,8 @@ def ops_cheat_sheet_page() -> str:
         {groups}
       </div>
       <section class="ops-empty glass" id="ops-empty">No commands match this filter.</section>
+        </div>
+      </div>
     """
     script = """
       <script>
@@ -6427,13 +7540,26 @@ def ops_cheat_sheet_page() -> str:
 @app.get("/logs", response_class=HTMLResponse)
 def logs_page() -> str:
     content = """
-      <section class="logs-panel glass" aria-label="System logs">
-        <div class="card-header">
-          <span class="icon"><svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"></path><path d="M8 9h8M8 13h8M8 17h5"></path></svg></span>
-          Logs
+      <div class="logs-container">
+        <div class="logs-header">
+          <div class="logs-title">
+            <span class="logs-icon">📋</span>
+            <span>System Logs</span>
+            <span class="logs-badge" id="log-count">--</span>
+          </div>
+          <div class="logs-status">
+            <span class="status-dot" id="log-status-dot"></span>
+            <span id="log-status-text">Live</span>
+          </div>
         </div>
-        <div class="log-stream" id="log-stream" role="log" aria-live="polite"></div>
-      </section>
+        <div class="logs-panel glass" aria-label="System logs">
+          <div class="log-stream" id="log-stream" role="log" aria-live="polite"></div>
+        </div>
+        <div class="logs-footer">
+          <span class="logs-info">Auto-refresh: 3s</span>
+          <span class="logs-info">Showing last 50 entries</span>
+        </div>
+      </div>
     """
     script = """
       <script>
@@ -6488,8 +7614,23 @@ def logs_page() -> str:
             }
             const data = await response.json();
             renderLogs(data.logs);
+            const logCountEl = document.getElementById("log-count");
+            const logStatusDot = document.getElementById("log-status-dot");
+            const logStatusText = document.getElementById("log-status-text");
+            if (logCountEl) logCountEl.textContent = data.logs.length;
+            if (data.status && data.status.running) {
+              if (logStatusDot) logStatusDot.style.background = "var(--ao-green)";
+              if (logStatusText) logStatusText.textContent = "Live";
+            } else {
+              if (logStatusDot) logStatusDot.style.background = "var(--ao-danger)";
+              if (logStatusText) logStatusText.textContent = "Stopped";
+            }
           } catch (error) {
             renderLogs([{ source: "logs", level: "error", message: "Log refresh failed.", timestamp: new Date().toISOString() }]);
+            const logStatusDot = document.getElementById("log-status-dot");
+            const logStatusText = document.getElementById("log-status-text");
+            if (logStatusDot) logStatusDot.style.background = "var(--ao-danger)";
+            if (logStatusText) logStatusText.textContent = "Error";
           }
         }
 
@@ -6761,6 +7902,141 @@ def _relative_to_base(path: Path) -> str:
         return str(path)
 
 
+def _safe_resource_name(value: str) -> str:
+    return _safe_incoming_script_name(value)
+
+
+def _incoming_resource_dir(resource_name: str) -> Path:
+    return _resolve_incoming_script_dir(resource_name)
+
+
+def _staging_resource_dir(resource_name: str) -> Path:
+    staging_root = (BASE_DIR / "staging").resolve()
+    candidate = (staging_root / resource_name).resolve()
+    if staging_root not in candidate.parents:
+        raise HTTPException(status_code=400, detail="Staging path must stay under staging/.")
+    return candidate
+
+
+def _orchestrator_staging_dir(resource_name: str) -> Path:
+    orch_root = (BASE_DIR / "orchestrator" / "staging").resolve()
+    candidate = (orch_root / resource_name).resolve()
+    if orch_root not in candidate.parents:
+        raise HTTPException(status_code=400, detail="Orchestrator staging path must stay under orchestrator/staging/.")
+    return candidate
+
+
+def _latest_analysis_report_path(resource_name: str) -> Path | None:
+    reports_dir = BASE_DIR / "reports" / "analysis"
+    if not reports_dir.is_dir():
+        return None
+    reports = sorted(
+        reports_dir.glob(f"analysis-{resource_name}-*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return reports[0] if reports else None
+
+
+def _patch_plan_json_path(resource_name: str) -> Path | None:
+    safe_name = _safe_resource_id(resource_name)
+    if not safe_name:
+        return None
+    path = _safe_patch_plan_path(safe_name)
+    return path if path.exists() else None
+
+
+def _compute_analysis_risk(resource_name: str) -> str:
+    report_path = _latest_analysis_report_path(resource_name)
+    if not report_path:
+        return "unknown"
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+    summary = _generate_analysis_summary(payload.get("full_analysis", {}))
+    return str(summary.get("risk", "unknown"))
+
+
+def _stage_info_paths(resource_name: str) -> tuple[Path, Path]:
+    stage_root = _staging_resource_dir(resource_name)
+    orch_root = _orchestrator_staging_dir(resource_name)
+    return stage_root / "stage-info.json", orch_root / "stage-info.json"
+
+
+def _read_stage_info(resource_name: str) -> dict[str, Any] | None:
+    stage_info_path, orch_stage_info_path = _stage_info_paths(resource_name)
+    for candidate in [orch_stage_info_path, stage_info_path]:
+        if not candidate.is_file():
+            continue
+        try:
+            return json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+    return None
+
+
+def _write_stage_info(resource_name: str, stage_info: dict[str, Any]) -> None:
+    stage_info_path, orch_stage_info_path = _stage_info_paths(resource_name)
+    stage_info_path.parent.mkdir(parents=True, exist_ok=True)
+    orch_stage_info_path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(stage_info, indent=2, sort_keys=True)
+    stage_info_path.write_text(encoded, encoding="utf-8")
+    orch_stage_info_path.write_text(encoded, encoding="utf-8")
+
+
+def _safe_rel_file_map(root: Path) -> dict[str, str]:
+    files: dict[str, str] = {}
+    ignore_rel_paths = {"stage-info.json"}
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(root.resolve())
+        except ValueError:
+            continue
+        rel = resolved.relative_to(root.resolve()).as_posix()
+        if rel in ignore_rel_paths:
+            continue
+        h = hashlib.sha256()
+        with resolved.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(8192), b""):
+                h.update(chunk)
+        files[rel] = h.hexdigest()
+    return files
+
+
+def _build_staging_diff(resource_name: str) -> dict[str, Any]:
+    incoming_dir = _incoming_resource_dir(resource_name)
+    staging_dir = _staging_resource_dir(resource_name)
+    if not staging_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Staging copy not found")
+    incoming_files = _safe_rel_file_map(incoming_dir)
+    staging_files = _safe_rel_file_map(staging_dir)
+
+    incoming_set = set(incoming_files.keys())
+    staging_set = set(staging_files.keys())
+    added = sorted(staging_set - incoming_set)
+    deleted = sorted(incoming_set - staging_set)
+    changed = sorted(
+        rel for rel in (incoming_set & staging_set) if incoming_files.get(rel) != staging_files.get(rel)
+    )
+    status = "READY" if not (added or deleted or changed) else "MODIFIED"
+    return {
+        "resource": resource_name,
+        "status": status,
+        "added_files": added,
+        "deleted_files": deleted,
+        "changed_files": changed,
+        "summary": {
+            "added": len(added),
+            "deleted": len(deleted),
+            "changed": len(changed),
+        },
+    }
+
+
 def _safe_workspace_file(relative_path: str, root_name: str) -> Path:
     root = (BASE_DIR / root_name).resolve()
     candidate = (BASE_DIR / relative_path).resolve()
@@ -6859,6 +8135,79 @@ def _incoming_entries(limit: int = 40) -> list[dict[str, Any]]:
     return entries
 
 
+def _get_incoming_resources_with_analysis(limit: int = 20) -> list[dict[str, Any]]:
+    """Get incoming resources with their analysis data if available."""
+    incoming_root = BASE_DIR / "incoming"
+    reports_dir = BASE_DIR / "reports" / "analysis"
+    patch_plan_root = BASE_DIR / "orchestrator" / "archive"
+
+    if not incoming_root.is_dir():
+        return []
+
+    resources: list[dict[str, Any]] = []
+
+    for path in sorted(incoming_root.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True)[:limit]:
+        if not path.is_dir():
+            continue
+
+        file_count = sum(1 for _ in path.rglob("*") if _.is_file())
+        resource = {
+            "name": path.name,
+            "path": _relative_to_base(path),
+            "file_count": file_count,
+            "updated_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
+            "manifest": None,
+            "analyzed": False,
+            "analysis": None,
+            "has_patch_plan": False,
+            "staging": {
+                "exists": False,
+                "status": "NONE",
+                "approved_at": None,
+            },
+        }
+
+        fxmanifest = path / "fxmanifest.lua"
+        resource_lua = path / "__resource.lua"
+        if fxmanifest.is_file():
+            resource["manifest"] = "fxmanifest.lua"
+        elif resource_lua.is_file():
+            resource["manifest"] = "__resource.lua"
+
+        if reports_dir.is_dir():
+            reports = sorted(
+                reports_dir.glob(f"analysis-{path.name}-*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if reports:
+                try:
+                    report = json.loads(reports[0].read_text(encoding="utf-8"))
+                    resource["analyzed"] = True
+                    resource["analysis"] = report.get("full_analysis", {})
+                    resource["analyzed_at"] = report.get("analyzed_at")
+                except (OSError, json.JSONDecodeError):
+                    pass
+
+        patch_plan_path = patch_plan_root / path.name / "patch-plan.json"
+        if patch_plan_path.is_file():
+            resource["has_patch_plan"] = True
+
+        try:
+            staging_dir = _staging_resource_dir(path.name)
+        except HTTPException:
+            staging_dir = None
+        if staging_dir and staging_dir.is_dir():
+            resource["staging"]["exists"] = True
+            stage_info = _read_stage_info(path.name) or {}
+            resource["staging"]["status"] = str(stage_info.get("status", "STAGED")).upper()
+            resource["staging"]["approved_at"] = stage_info.get("approved_at")
+
+        resources.append(resource)
+
+    return resources
+
+
 def _upload_jobs(limit: int = 30) -> list[dict[str, Any]]:
     root = BASE_DIR / "reports" / "upload-pipeline"
     if not root.is_dir():
@@ -6873,6 +8222,33 @@ def _upload_jobs(limit: int = 30) -> list[dict[str, Any]]:
         data["updated_at"] = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
         jobs.append(data)
     return jobs
+
+
+def _staging_approval_entries(limit: int = 20) -> list[dict[str, Any]]:
+    incoming_root = BASE_DIR / "incoming"
+    if not incoming_root.is_dir():
+        return []
+    approvals: list[dict[str, Any]] = []
+    for path in sorted(incoming_root.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
+        if not path.is_dir():
+            continue
+        stage_info = _read_stage_info(path.name)
+        if not stage_info:
+            continue
+        status = str(stage_info.get("status", "")).upper()
+        if status not in {"APPROVED", "REJECTED"}:
+            continue
+        risk = str(stage_info.get("risk_level", "unknown")).lower()
+        approvals.append(
+            {
+                "task_id": f"staging:{path.name}",
+                "step_name": f"{path.name} ({status})",
+                "risk_level": risk if risk in {"high", "medium", "low"} else "unknown",
+            }
+        )
+        if len(approvals) >= limit:
+            break
+    return approvals
 
 
 def _recent_reports_html(limit: int = 12) -> str:
@@ -6954,12 +8330,14 @@ def _incoming_index_html(limit: int = 8) -> str:
     for entry in entries:
         cards.append(
             f"""
-            <article class="index-card">
+            <article class="index-card incoming-card" data-script-name="{esc(entry["name"])}">
               <div class="card-title-row"><h2>{esc(entry["name"])}</h2>{_status_pill(entry["kind"])}</div>
               <p>{esc(entry["file_count"])} file(s) · {esc(_format_timestamp(entry["updated_at"]))}</p>
               <p class="subtle-id">{esc(entry["path"])}</p>
+              <div class="analysis-summary" id="analysis-{esc(entry["name"])}"></div>
               <div class="index-actions">
-                <button class="button secondary ai-check-button" type="button" data-path="{esc(str(BASE_DIR / entry["path"]))}">Run AI Integration Check</button>
+                <button class="button analyze-button" type="button" data-script="{esc(entry["name"])}">Analyze</button>
+                <button class="button secondary ai-check-button" type="button" data-path="{esc(str(BASE_DIR / entry["path"]))}">AI Check</button>
               </div>
             </article>
             """
@@ -7714,6 +9092,17 @@ def _upload_page_css() -> str:
       .result-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
       .ai-check-button{font:inherit}
       .hidden{display:none}
+      .incoming-card .analysis-summary{margin:10px 0;padding:8px;border:1px solid var(--ao-border);border-radius:6px;background:rgba(2,6,23,.3)}
+      .analysis-result{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+      .analysis-badge{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;background:rgba(0,212,255,.12);color:var(--ao-cyan);border:1px solid rgba(0,212,255,.2)}
+      .analysis-badge.framework{background:rgba(167,139,250,.12);color:#a78bfa;border-color:rgba(167,139,250,.2)}
+      .analysis-badge.inventory{background:rgba(52,211,153,.12);color:#34d399;border-color:rgba(52,211,153,.2)}
+      .analysis-badge.target{background:rgba(251,191,36,.12);color:#fbbf24;border-color:rgba(251,191,36,.2)}
+      .analysis-badge.database{background:rgba(96,165,250,.12);color:#60a5fa;border-color:rgba(96,165,250,.2)}
+      .analysis-badge.risk{background:rgba(255,99,112,.12);border-color:rgba(255,99,112,.2)}
+      .analysis-action{font-size:12px;color:var(--ao-muted)}
+      .analysis-error{color:var(--ao-danger);font-size:12px}
+      .analyze-button{font:inherit;background:rgba(0,212,255,.15);border-color:rgba(0,212,255,.3)}
       @media (max-width: 700px){.upload-head,.safety-head{display:block}.safety-pill{display:inline-flex;margin-top:12px}.picker-row>*{width:100%;justify-content:center}.safety-grid{grid-template-columns:1fr}}
     """
 
@@ -7728,7 +9117,32 @@ def _upload_page_script() -> str:
         const fileList = document.getElementById("fileList");
         const uploadButton = document.getElementById("uploadButton");
         const resultCard = document.getElementById("resultCard");
+        const ANALYSIS_ACTION_LABELS = {
+          "safe": "Ready for staging",
+          "manual-sql": "SQL requires manual review",
+          "review-required": "Risk - review needed",
+          "adaptation-needed": "Framework adaptation required"
+        };
         let selectedFiles = [];
+
+        function escapeHtml(value) {
+          return String(value)
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#039;");
+        }
+
+        function getRiskColor(risk) {
+          if (risk === "high") return "var(--ao-danger)";
+          if (risk === "medium") return "#facc15";
+          return "var(--ao-green)";
+        }
+
+        function getActionLabel(recommendedAction) {
+          return ANALYSIS_ACTION_LABELS[recommendedAction] || recommendedAction || "Ready";
+        }
 
         function setFiles(files) {
           selectedFiles = Array.from(files || []);
@@ -7851,6 +9265,60 @@ def _upload_page_script() -> str:
           const button = event.target.closest(".ai-check-button");
           if (!button) return;
           runAiCheck(button.dataset.path, button);
+        });
+
+        async function runAnalyze(scriptName, button) {
+          if (!scriptName) return;
+          const original = button ? button.textContent : "";
+          if (button) {
+            button.disabled = true;
+            button.textContent = "Analyzing...";
+          }
+          const summaryEl = document.getElementById("analysis-" + scriptName);
+          try {
+            const response = await fetch("/api/incoming/" + encodeURIComponent(scriptName) + "/analyze", {
+              method: "POST",
+            });
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.detail || body.error || "Analysis failed.");
+
+            if (body.status === "success" && body.summary) {
+              const s = body.summary;
+              const actionText = getActionLabel(s.recommended_action);
+
+              if (summaryEl) {
+                summaryEl.innerHTML = `
+                  <div class="analysis-result">
+                    <span class="analysis-badge framework">${escapeHtml(s.framework)}</span>
+                    <span class="analysis-badge inventory">${escapeHtml(s.inventory)}</span>
+                    <span class="analysis-badge target">${escapeHtml(s.target)}</span>
+                    <span class="analysis-badge database">${escapeHtml(s.database)}</span>
+                    <span class="analysis-badge risk" style="color:${getRiskColor(s.risk)}">Risk: ${escapeHtml(s.risk)}</span>
+                    <span class="analysis-action">${escapeHtml(actionText)}</span>
+                  </div>
+                `;
+              }
+              if (button) {
+                button.textContent = "Analyzed";
+              }
+            } else {
+              throw new Error(body.error || "Analysis failed");
+            }
+          } catch (error) {
+            if (summaryEl) {
+              summaryEl.innerHTML = `<span class="analysis-error">Error: ${String(error.message || error)}</span>`;
+            }
+            if (button) {
+              button.textContent = original;
+              button.disabled = false;
+            }
+          }
+        }
+
+        document.addEventListener("click", event => {
+          const button = event.target.closest(".analyze-button");
+          if (!button) return;
+          runAnalyze(button.dataset.script, button);
         });
       </script>
     """
@@ -8014,6 +9482,105 @@ def api_staging() -> dict[str, Any]:
     return {"staging": entries}
 
 
+@app.post("/api/staging/{resource}/create")
+def api_staging_create(resource: str) -> dict[str, Any]:
+    """Create a staging-safe copy of an incoming resource."""
+    safe_resource = _safe_resource_name(resource)
+    incoming_dir = _incoming_resource_dir(safe_resource)
+    staging_dir = _staging_resource_dir(safe_resource)
+
+    if staging_dir.exists():
+        raise HTTPException(status_code=409, detail="Staging copy already exists")
+
+    shutil.copytree(incoming_dir, staging_dir)
+
+    analysis_report = _latest_analysis_report_path(safe_resource)
+    patch_plan = _patch_plan_json_path(safe_resource)
+    risk_level = _compute_analysis_risk(safe_resource)
+    now = _utc_now()
+    stage_info = {
+        "resource": safe_resource,
+        "timestamp": now,
+        "original_incoming_path": _relative_to_base(incoming_dir),
+        "staging_path": _relative_to_base(staging_dir),
+        "analysis_report_path": _relative_to_base(analysis_report) if analysis_report else None,
+        "patch_plan_path": _relative_to_base(patch_plan) if patch_plan else None,
+        "status": "STAGED",
+        "staged_by": "dashboard-v2",
+        "risk_level": risk_level,
+        "approved_at": None,
+    }
+    _write_stage_info(safe_resource, stage_info)
+
+    diff = _build_staging_diff(safe_resource)
+    orch_stage_dir = _orchestrator_staging_dir(safe_resource)
+    orch_stage_dir.mkdir(parents=True, exist_ok=True)
+    (orch_stage_dir / "diff.json").write_text(json.dumps(diff, indent=2, sort_keys=True), encoding="utf-8")
+
+    return {
+        "status": "success",
+        "resource": safe_resource,
+        "staging_path": _relative_to_base(staging_dir),
+        "stage_info_path": _relative_to_base(orch_stage_dir / "stage-info.json"),
+        "diff_path": _relative_to_base(orch_stage_dir / "diff.json"),
+        "staging_status": diff.get("status", "STAGED"),
+    }
+
+
+@app.get("/api/staging/{resource}/diff")
+def api_staging_diff(resource: str) -> dict[str, Any]:
+    safe_resource = _safe_resource_name(resource)
+    diff = _build_staging_diff(safe_resource)
+    stage_info = _read_stage_info(safe_resource) or {}
+    # Keep stage status synchronized with current diff state for UI badges.
+    if stage_info:
+        if str(stage_info.get("status", "")).upper() != "APPROVED":
+            stage_info["status"] = diff["status"]
+            _write_stage_info(safe_resource, stage_info)
+    orch_stage_dir = _orchestrator_staging_dir(safe_resource)
+    orch_stage_dir.mkdir(parents=True, exist_ok=True)
+    (orch_stage_dir / "diff.json").write_text(json.dumps(diff, indent=2, sort_keys=True), encoding="utf-8")
+    return diff
+
+
+@app.post("/api/staging/{resource}/approve")
+def api_staging_approve(resource: str) -> dict[str, Any]:
+    safe_resource = _safe_resource_name(resource)
+    stage_info = _read_stage_info(safe_resource)
+    if not stage_info:
+        raise HTTPException(status_code=404, detail="Staging info not found")
+    stage_info["status"] = "APPROVED"
+    stage_info["approved_at"] = _utc_now()
+    _write_stage_info(safe_resource, stage_info)
+    return {
+        "status": "success",
+        "resource": safe_resource,
+        "staging_status": "APPROVED",
+        "approved_at": stage_info["approved_at"],
+    }
+
+
+@app.delete("/api/staging/{resource}")
+def api_staging_delete(resource: str) -> dict[str, Any]:
+    safe_resource = _safe_resource_name(resource)
+    staging_dir = _staging_resource_dir(safe_resource)
+    orch_staging_dir = _orchestrator_staging_dir(safe_resource)
+
+    if not staging_dir.exists() and not orch_staging_dir.exists():
+        raise HTTPException(status_code=404, detail="Staging copy not found")
+
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    if orch_staging_dir.exists():
+        shutil.rmtree(orch_staging_dir)
+
+    return {
+        "status": "success",
+        "resource": safe_resource,
+        "deleted": True,
+    }
+
+
 @app.get("/api/incoming")
 def api_incoming() -> dict[str, Any]:
     return {"incoming": _incoming_entries()}
@@ -8145,6 +9712,581 @@ async def start_system_watcher() -> dict:
 @app.post("/agents/system_watcher/stop")
 async def stop_system_watcher() -> dict:
     return await system_watcher.stop()
+
+
+# AGENTOS ANALYZE UPLOAD START
+
+def _safe_incoming_script_name(script_name: str) -> str:
+    """Validate incoming script folder name used by analyze endpoints."""
+    value = _safe_named_item(script_name.strip(), "script name")
+    if value in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Invalid script name.")
+    return value
+
+
+def _resolve_incoming_script_dir(script_name: str) -> Path:
+    """
+    Resolve script directory under incoming/ and enforce containment.
+    This is the canonical path guard for analyze endpoints.
+    """
+    incoming_root = (BASE_DIR / "incoming").resolve()
+    script_path = (incoming_root / script_name).resolve()
+    if incoming_root not in script_path.parents:
+        raise HTTPException(status_code=400, detail="Script path must stay under incoming/.")
+    if not script_path.exists():
+        raise HTTPException(status_code=404, detail=f"Script not found: {script_name}")
+    if not script_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {script_name}")
+    return script_path
+
+
+def _build_analysis_report_path(script_name: str) -> Path:
+    """
+    Build a unique report file path.
+    Keep reports append-only to avoid accidental overwrite during same-second requests.
+    """
+    reports_dir = BASE_DIR / "reports" / "analysis"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    unique = uuid4().hex[:8]
+    return reports_dir / f"analysis-{script_name}-{timestamp}-{unique}.json"
+
+
+def _analyze_fivem_script(script_name: str) -> dict[str, Any]:
+    """Analyze a FiveM script in the incoming folder (read-only)."""
+    if not BUILDER_SCANNER_AVAILABLE:
+        return {
+            "error": "Builder scanner not available",
+            "script_path": None,
+            "status": "error",
+        }
+
+    try:
+        script_path = _resolve_incoming_script_dir(script_name)
+    except HTTPException as error:
+        return {"error": str(error.detail), "script_path": None, "status": "error"}
+
+    try:
+        config = PlannerConfig()
+        scanner = ScriptScanner(config)
+        # ScriptScanner resolves relative paths from agents root, not incoming root.
+        # Pass an explicit incoming-relative path so valid incoming resources are accepted
+        # while scanner/path guards still block traversal and escaped locations.
+        scanner_target = (Path("incoming") / script_name).as_posix()
+        result = scanner.scan(scanner_target)
+
+        result["status"] = "analyzed"
+        result["analyzed_at"] = datetime.now(timezone.utc).isoformat()
+
+        return result
+    except Exception as e:
+        return {
+            "error": str(e),
+            "script_path": str(script_path),
+            "status": "error",
+        }
+
+
+def _save_analysis_report(script_name: str, analysis: dict[str, Any]) -> Path:
+    """Save analysis report to reports folder."""
+    report_file = _build_analysis_report_path(script_name)
+
+    report_data = {
+        "script_name": script_name,
+        "analyzed_at": analysis.get("analyzed_at", datetime.now(timezone.utc).isoformat()),
+        "status": analysis.get("status", "unknown"),
+        "script_path": analysis.get("script_path"),
+        "files_count": len(analysis.get("files", [])),
+        "markers": analysis.get("markers", {}),
+        "findings": analysis.get("findings", []),
+        "dependencies": analysis.get("dependencies", []),
+        "full_analysis": analysis,
+    }
+
+    report_file.write_text(json.dumps(report_data, indent=2), encoding="utf-8")
+    return report_file
+
+
+def _generate_analysis_summary(analysis: dict[str, Any]) -> dict[str, Any]:
+    """Generate a human-readable summary of the analysis."""
+    markers = analysis.get("markers", {})
+
+    framework = "standalone"
+    if "QBCore" in markers.get("framework", {}):
+        framework = "QBCore"
+    elif "ESX" in markers.get("framework", {}):
+        framework = "ESX"
+    elif "Qbox" in markers.get("framework", {}):
+        framework = "Qbox"
+
+    inventory = "none"
+    if "qb-inventory" in markers.get("inventory", {}):
+        inventory = "qb-inventory"
+    elif "ox_inventory" in markers.get("inventory", {}):
+        inventory = "ox_inventory"
+    elif "ps-inventory" in markers.get("inventory", {}):
+        inventory = "ps-inventory"
+
+    target = "none"
+    if "qb-target" in markers.get("target", {}):
+        target = "qb-target"
+    elif "ox_target" in markers.get("target", {}):
+        target = "ox_target"
+
+    database = "none"
+    if "oxmysql" in markers.get("database", {}):
+        database = "oxmysql"
+    elif "mysql-async" in markers.get("database", {}):
+        database = "mysql-async"
+    elif "ghmattimysql" in markers.get("database", {}):
+        database = "ghmattimysql"
+
+    findings = analysis.get("findings", [])
+    risk_level = "low"
+    for finding in findings:
+        if finding.get("severity") == "high":
+            risk_level = "high"
+            break
+        elif finding.get("severity") == "medium" and risk_level != "high":
+            risk_level = "medium"
+
+    sql_files = analysis.get("sql_files", [])
+    has_sql = len(sql_files) > 0
+
+    recommended = "safe"
+    if has_sql:
+        recommended = "manual-sql"
+    if risk_level == "high":
+        recommended = "review-required"
+    if framework == "ESX":
+        recommended = "adaptation-needed"
+
+    return {
+        "framework": framework,
+        "inventory": inventory,
+        "target": target,
+        "database": database,
+        "risk": risk_level,
+        "has_sql": has_sql,
+        "recommended_action": recommended,
+    }
+
+
+@app.post("/api/incoming/{script_name}/analyze")
+async def analyze_incoming_script(script_name: str) -> dict[str, Any]:
+    """Analyze a FiveM script in the incoming folder (read-only, no server modifications)."""
+    safe_name = _safe_incoming_script_name(script_name)
+    _resolve_incoming_script_dir(safe_name)
+
+    # Scanner reads many files; run in worker thread to avoid blocking event loop.
+    analysis = await run_in_threadpool(_analyze_fivem_script, safe_name)
+
+    if analysis.get("error"):
+        return {
+            "status": "error",
+            "error": analysis.get("error"),
+            "script_name": safe_name,
+        }
+
+    report_path = await run_in_threadpool(_save_analysis_report, safe_name, analysis)
+    summary = _generate_analysis_summary(analysis)
+
+    return {
+        "status": "success",
+        "script_name": safe_name,
+        "report_path": str(report_path),
+        "summary": summary,
+        "files_count": len(analysis.get("files", [])),
+        "findings_count": len(analysis.get("findings", [])),
+    }
+
+
+@app.get("/api/incoming/{script_name}/analysis_report")
+async def get_analysis_report(script_name: str) -> dict[str, Any]:
+    """Get the latest analysis report for a script."""
+    safe_name = _safe_incoming_script_name(script_name)
+
+    reports_dir = BASE_DIR / "reports" / "analysis"
+    if not reports_dir.is_dir():
+        return {"status": "no_reports", "message": "No analysis reports found"}
+
+    reports = sorted(
+        reports_dir.glob(f"analysis-{safe_name}-*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    if not reports:
+        return {"status": "not_analyzed", "message": f"No analysis found for {safe_name}"}
+
+    try:
+        report = json.loads(reports[0].read_text(encoding="utf-8"))
+        summary = _generate_analysis_summary(report.get("full_analysis", {}))
+        return {
+            "status": "found",
+            "report_path": str(reports[0]),
+            "analyzed_at": report.get("analyzed_at"),
+            "summary": summary,
+            "full_report": report,
+        }
+    except (OSError, json.JSONDecodeError) as e:
+        return {"status": "error", "error": str(e)}
+
+
+# AGENTOS ANALYZE UPLOAD END
+
+# PATCH PLAN GENERATION START
+import re as patch_re
+from typing import Any as PatchAny
+
+try:
+    from orchestrator.patch_plan_generator import (
+        get_patch_plan_generator,
+        generate_patch_plan_background,
+    )
+    PATCH_PLAN_GENERATOR_AVAILABLE = True
+    PATCH_PLAN_IMPORT_ERROR = ""
+except Exception as exc:
+    PATCH_PLAN_GENERATOR_AVAILABLE = False
+    PATCH_PLAN_IMPORT_ERROR = str(exc)
+    get_patch_plan_generator = None
+    generate_patch_plan_background = None
+
+
+def _safe_resource_id(resource_id: str) -> str:
+    safe = patch_re.sub(r"[^A-Za-z0-9_\-]", "", resource_id)
+    if safe != resource_id:
+        return ""
+    return safe
+
+
+def _latest_analysis_report_for_resource(resource_id: str) -> Path | None:
+    reports_dir = (BASE_DIR / "reports" / "analysis").resolve()
+    if not reports_dir.is_dir():
+        return None
+    reports = sorted(
+        reports_dir.glob(f"analysis-{resource_id}-*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return reports[0] if reports else None
+
+
+@app.post("/api/analysis/{resource_id}/generate-patch-plan")
+async def generate_patch_plan(resource_id: str, force: bool = False) -> dict[str, PatchAny]:
+    """Trigger patch plan generation for an analyzed resource."""
+    if not PATCH_PLAN_GENERATOR_AVAILABLE:
+        detail = "Patch plan generator not available"
+        if PATCH_PLAN_IMPORT_ERROR:
+            detail += f": {PATCH_PLAN_IMPORT_ERROR}"
+        raise HTTPException(status_code=500, detail=detail)
+
+    safe_name = _safe_resource_id(resource_id)
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Invalid resource_id")
+
+    incoming_dir = BASE_DIR / "incoming" / safe_name
+    if not incoming_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Resource {safe_name} not found")
+
+    report_path = _latest_analysis_report_for_resource(safe_name)
+    if not report_path:
+        raise HTTPException(status_code=400, detail="No analysis exists for this resource")
+    try:
+        json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="Malformed analysis report for this resource")
+
+    generator = get_patch_plan_generator()
+    result = generator.generate(safe_name, force=force)
+    return result
+
+
+@app.get("/api/analysis/{resource_id}/patch-plan/json")
+async def get_patch_plan_json(resource_id: str) -> dict[str, PatchAny]:
+    """Get patch plan in JSON format."""
+    if not PATCH_PLAN_GENERATOR_AVAILABLE:
+        detail = "Patch plan generator not available"
+        if PATCH_PLAN_IMPORT_ERROR:
+            detail += f": {PATCH_PLAN_IMPORT_ERROR}"
+        raise HTTPException(status_code=500, detail=detail)
+
+    safe_name = _safe_resource_id(resource_id)
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Invalid resource_id")
+
+    generator = get_patch_plan_generator()
+    result = generator.get_patch_plan(safe_name, format="json")
+    if isinstance(result, dict) and result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.get("/api/analysis/{resource_id}/patch-plan/md")
+async def get_patch_plan_md(resource_id: str) -> dict[str, PatchAny]:
+    """Get patch plan in Markdown format."""
+    if not PATCH_PLAN_GENERATOR_AVAILABLE:
+        detail = "Patch plan generator not available"
+        if PATCH_PLAN_IMPORT_ERROR:
+            detail += f": {PATCH_PLAN_IMPORT_ERROR}"
+        raise HTTPException(status_code=500, detail=detail)
+
+    safe_name = _safe_resource_id(resource_id)
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Invalid resource_id")
+
+    generator = get_patch_plan_generator()
+    md_content = generator.get_patch_plan(safe_name, format="md")
+    if isinstance(md_content, dict) and "error" in md_content:
+        raise HTTPException(status_code=404, detail=md_content["error"])
+    return {"content": md_content, "format": "markdown"}
+
+
+@app.get("/api/analysis/{resource_id}/patch-plan/status")
+async def get_patch_plan_status(resource_id: str) -> dict[str, PatchAny]:
+    """Get patch plan generation status."""
+    if not PATCH_PLAN_GENERATOR_AVAILABLE:
+        detail = "Patch plan generator not available"
+        if PATCH_PLAN_IMPORT_ERROR:
+            detail += f": {PATCH_PLAN_IMPORT_ERROR}"
+        raise HTTPException(status_code=500, detail=detail)
+
+    safe_name = _safe_resource_id(resource_id)
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Invalid resource_id")
+
+    generator = get_patch_plan_generator()
+    status = generator.get_status(safe_name)
+    if status.get("status") == "pending":
+        # Keep status endpoint explicit when no plan exists yet.
+        return {
+            **status,
+            "message": "No patch plan generated yet",
+        }
+    return status
+
+
+# PATCH PLAN GENERATION END
+
+
+# AGENTOS PROMPT HANDOFF START
+PROMPTS_DIR = BASE_DIR / "orchestrator" / "prompts"
+PROMPTS_ARCHIVE_DIR = PROMPTS_DIR / "archive"
+OPENCODE_PROMPT_LATEST = PROMPTS_DIR / "opencode-next.md"
+CODEX_AUDIT_PROMPT_LATEST = PROMPTS_DIR / "codex-audit-next.md"
+
+
+def _ensure_prompt_layout() -> None:
+    PROMPTS_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+    if not OPENCODE_PROMPT_LATEST.exists():
+        OPENCODE_PROMPT_LATEST.write_text("", encoding="utf-8")
+    if not CODEX_AUDIT_PROMPT_LATEST.exists():
+        CODEX_AUDIT_PROMPT_LATEST.write_text("", encoding="utf-8")
+
+
+def _safe_patch_plan_path(resource_id: str) -> Path:
+    safe_name = _safe_resource_id(resource_id)
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Invalid resource_id")
+    patch_root = (BASE_DIR / "orchestrator" / "archive").resolve()
+    candidate = (patch_root / safe_name / "patch-plan.json").resolve()
+    try:
+        candidate.relative_to(patch_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid resource path") from exc
+    return candidate
+
+
+def _archive_existing_prompt(latest_path: Path, resource_id: str, prompt_type: str) -> None:
+    if not latest_path.exists():
+        return
+    existing = latest_path.read_text(encoding="utf-8").strip()
+    if not existing:
+        return
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    archive_name = f"{resource_id}_{prompt_type}_{timestamp}.md"
+    archive_path = PROMPTS_ARCHIVE_DIR / archive_name
+    archive_path.write_text(existing, encoding="utf-8")
+
+
+def _build_opencode_prompt(resource_id: str, patch_plan: dict[str, Any], generated_at: str) -> str:
+    risks = patch_plan.get("risk_summary") or {}
+    migration = patch_plan.get("migration_targets") or {}
+    phases = patch_plan.get("phases") or []
+    high_risks = risks.get("high", [])
+    medium_risks = risks.get("medium", [])
+
+    return f"""# OpenCode Implementation Prompt
+
+Resource: {resource_id}
+Generated At (UTC): {generated_at}
+Source Patch Plan: orchestrator/archive/{resource_id}/patch-plan.json
+
+Implement the patch plan for this FiveM resource with strict safety controls.
+
+Safety constraints (mandatory):
+- Staging-only modifications; do not modify live FiveM server files.
+- Create backups before editing any script files.
+- Use AGENT FIX START and AGENT FIX END markers around major generated changes.
+- Run syntax validation checks for touched files before completing.
+- Provide a changed-files summary with brief rationale for each change.
+- Do NOT run git push.
+- Do NOT run txAdmin restart.
+- Do NOT perform live server edits.
+
+Detected risks from patch plan:
+- High risk findings: {json.dumps(high_risks, ensure_ascii=True)}
+- Medium risk findings: {json.dumps(medium_risks, ensure_ascii=True)}
+
+Migration targets:
+{json.dumps(migration, indent=2, ensure_ascii=True)}
+
+Execution scope:
+- Follow patch-plan phases and proposed edits only.
+- If a step is ambiguous, stop and report assumptions before applying changes.
+
+Patch-plan phases:
+{json.dumps(phases, indent=2, ensure_ascii=True)}
+"""
+
+
+def _build_codex_audit_prompt(resource_id: str, patch_plan: dict[str, Any], generated_at: str) -> str:
+    return f"""# Codex Stabilization Audit Prompt
+
+Resource: {resource_id}
+Generated At (UTC): {generated_at}
+Source Patch Plan: orchestrator/archive/{resource_id}/patch-plan.json
+
+Audit OpenCode implementation results against the patch plan.
+
+Audit requirements (mandatory):
+- Verify AGENT FIX START / AGENT FIX END markers exist around major generated edits.
+- Verify no live server modifications were made.
+- Verify no txAdmin restart, apply, or staging automation was triggered.
+- Verify syntax checks passed for changed files.
+- Verify changed-files summary is present and accurate.
+- Verify implementation remains compliant with patch-plan scope.
+
+Security checks:
+- Confirm no path traversal or unsafe file writes were introduced.
+- Confirm no secrets, env files, caches, backups, or runtime artifacts were committed.
+
+Deliverable:
+- List findings by severity (critical/high/medium/low).
+- Include precise file references and minimal remediation actions.
+- Mark whether patch-plan compliance is PASS or FAIL with reasons.
+
+Patch-plan metadata:
+{json.dumps(patch_plan.get("metadata", {}), indent=2, ensure_ascii=True)}
+"""
+
+
+def _write_generated_prompts(resource_id: str, patch_plan: dict[str, Any]) -> dict[str, Any]:
+    _ensure_prompt_layout()
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    _archive_existing_prompt(OPENCODE_PROMPT_LATEST, resource_id, "opencode")
+    _archive_existing_prompt(CODEX_AUDIT_PROMPT_LATEST, resource_id, "codex")
+
+    opencode_prompt = _build_opencode_prompt(resource_id, patch_plan, generated_at)
+    codex_prompt = _build_codex_audit_prompt(resource_id, patch_plan, generated_at)
+
+    OPENCODE_PROMPT_LATEST.write_text(opencode_prompt, encoding="utf-8")
+    CODEX_AUDIT_PROMPT_LATEST.write_text(codex_prompt, encoding="utf-8")
+
+    archive_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    opencode_archive = PROMPTS_ARCHIVE_DIR / f"{resource_id}_opencode_{archive_timestamp}.md"
+    codex_archive = PROMPTS_ARCHIVE_DIR / f"{resource_id}_codex_{archive_timestamp}.md"
+    opencode_archive.write_text(opencode_prompt, encoding="utf-8")
+    codex_archive.write_text(codex_prompt, encoding="utf-8")
+
+    return {
+        "status": "success",
+        "resource_id": resource_id,
+        "generated_at": generated_at,
+        "latest": {
+            "opencode": str(OPENCODE_PROMPT_LATEST),
+            "codex_audit": str(CODEX_AUDIT_PROMPT_LATEST),
+        },
+        "archive": {
+            "opencode": str(opencode_archive),
+            "codex_audit": str(codex_archive),
+        },
+    }
+
+
+def _read_prompt_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Prompt file not found: {path.name}")
+    content = path.read_text(encoding="utf-8")
+    if not content.strip():
+        raise HTTPException(status_code=404, detail=f"Prompt file is empty: {path.name}")
+    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"path": str(path), "generated_at": mtime, "content": content}
+
+
+@app.post("/api/patch-plan/{resource_id}/generate-opencode-prompt")
+async def generate_opencode_prompt(resource_id: str) -> dict[str, Any]:
+    patch_plan_path = _safe_patch_plan_path(resource_id)
+    if not patch_plan_path.exists():
+        raise HTTPException(status_code=404, detail="Patch plan not found for resource")
+    try:
+        patch_plan = json.loads(patch_plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Malformed patch plan: {exc}") from exc
+    return _write_generated_prompts(_safe_resource_id(resource_id), patch_plan)
+
+
+@app.get("/api/prompts/opencode-next")
+async def get_opencode_prompt_latest() -> dict[str, Any]:
+    return _read_prompt_file(OPENCODE_PROMPT_LATEST)
+
+
+@app.get("/api/prompts/codex-audit-next")
+async def get_codex_audit_prompt_latest() -> dict[str, Any]:
+    return _read_prompt_file(CODEX_AUDIT_PROMPT_LATEST)
+
+
+def _prompt_view_page(title: str, subtitle: str, prompt_data: dict[str, Any], source_label: str) -> str:
+    content = f"""
+    <section class="ao-card">
+        <h2>{esc(title)}</h2>
+        <p><strong>Resource:</strong> {esc(source_label)}</p>
+        <p><strong>Generated:</strong> {esc(prompt_data.get("generated_at", "unknown"))}</p>
+        <div class="index-actions">
+            <button class="button" onclick="copyPrompt()">Copy</button>
+            <a class="button secondary" href="/dashboard-v2">Back to Dashboard V2</a>
+        </div>
+        <pre id="prompt-content" style="max-height:65vh;overflow:auto;white-space:pre-wrap;background:#050914;border:1px solid #2a3348;padding:14px;border-radius:8px;color:#e7edf8;">{esc(prompt_data.get("content", ""))}</pre>
+    </section>
+    """
+    extra_js = """
+    <script>
+    function copyPrompt() {
+        const text = document.getElementById("prompt-content")?.textContent || "";
+        navigator.clipboard.writeText(text).then(() => alert("Prompt copied."));
+    }
+    </script>
+    """
+    return render_layout(title, "dashboard-v2", content, "", extra_js, subtitle=subtitle)
+
+
+@app.get("/dashboard-v2/opencode-prompt", response_class=HTMLResponse)
+def view_opencode_prompt_page() -> str:
+    data = _read_prompt_file(OPENCODE_PROMPT_LATEST)
+    match = re.search(r"^Resource:\s*([A-Za-z0-9_-]+)\s*$", data["content"], re.MULTILINE)
+    resource_name = match.group(1) if match else "unknown"
+    return _prompt_view_page("OpenCode Prompt", "Latest OpenCode implementation prompt", data, resource_name)
+
+
+@app.get("/dashboard-v2/codex-audit-prompt", response_class=HTMLResponse)
+def view_codex_prompt_page() -> str:
+    data = _read_prompt_file(CODEX_AUDIT_PROMPT_LATEST)
+    match = re.search(r"^Resource:\s*([A-Za-z0-9_-]+)\s*$", data["content"], re.MULTILINE)
+    resource_name = match.group(1) if match else "unknown"
+    return _prompt_view_page("Codex Audit Prompt", "Latest Codex stabilization audit prompt", data, resource_name)
+# AGENTOS PROMPT HANDOFF END
 
 
 @app.get("/self-heal/status")
