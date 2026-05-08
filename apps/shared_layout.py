@@ -631,3 +631,51 @@ def render_layout(title: str, active: str, content: str, extra_css: str = "", sc
   {script}
 </body>
 </html>"""
+
+
+def render_cyber_layout(
+    title: str,
+    active: str,
+    content: str,
+    extra_css: str = "",
+    script: str = "",
+    topbar_stats: dict[str, object] | None = None,
+) -> str:
+    """Render cyberpunk FiveM AI IDE layout."""
+    try:
+        from apps.orchestrator_v1_helpers import cyber_layout_css, cyber_js, render_sidebar, render_topbar
+        sidebar = render_sidebar(active)
+        topbar = render_topbar(topbar_stats or {})
+        # Cyber routes intentionally avoid legacy AgentOS shell CSS so blueprint layout
+        # structure and spacing remain consistent across Mission Control/Upload/Review/Logs.
+        css = cyber_layout_css() + extra_css
+        script_block = f"<script>{cyber_js()}</script>{script}"
+    except ImportError:
+        sidebar = sidebar_html(active)
+        topbar = f'<header class="ao-topbar"><div><h1>{esc(title)}</h1></header>'
+        css = layout_css() + extra_css
+        script_block = script
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{esc(title)} | ORCHESTRATOR_V1</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    {css}
+  </style>
+</head>
+<body>
+  <div class="cyber-shell">
+    {sidebar}
+    <main class="cyber-main">
+      {topbar}
+      {content}
+    </main>
+  </div>
+  {script_block}
+</body>
+</html>"""

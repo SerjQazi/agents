@@ -2843,9 +2843,731 @@ def dashboard() -> str:
     """
 
 
+def _incoming_resource_queue_html() -> str:
+    """Render the Upload Pipeline-owned incoming resource queue shell."""
+    return """
+      <section class="incoming-queue-section" id="incoming-queue">
+        <div class="incoming-queue-head">
+          <div>
+            <span class="pipeline-kicker">UPLOAD -> SCAN -> ANALYZE -> PLAN -> STAGE -> REVIEW</span>
+            <h3>Incoming Resource Queue</h3>
+            <p>Resource-level controls live here so Mission Control stays focused on monitoring and approvals.</p>
+          </div>
+          <a class="button secondary" href="/reviews">Open Codex Review</a>
+        </div>
+        <div class="incoming-queue-loading" id="incoming-queue-loading">Loading incoming resources...</div>
+        <div class="incoming-queue-error" id="incoming-queue-error" style="display:none;">Failed to load resources</div>
+        <div class="incoming-queue-empty" id="incoming-queue-empty" style="display:none;">No incoming resources found</div>
+        <div class="incoming-queue-list" id="incoming-queue-list"></div>
+      </section>
+    """
+
+
+def _document_modal_html() -> str:
+    """Shared document modal used by queue actions for plans, prompts, and staging diffs."""
+    return """
+      <div class="doc-modal-overlay" id="doc-modal-overlay" aria-hidden="true">
+        <div class="doc-modal" role="dialog" aria-modal="true" aria-labelledby="doc-modal-title">
+          <div class="doc-modal-header">
+            <div>
+              <h3 id="doc-modal-title" class="doc-modal-title">Document</h3>
+              <p id="doc-modal-meta" class="doc-modal-meta">Ready</p>
+            </div>
+            <div class="doc-modal-actions">
+              <button class="button secondary" type="button" id="doc-modal-copy-btn">Copy</button>
+              <button class="button secondary" type="button" id="doc-modal-close-btn" aria-label="Close">X</button>
+            </div>
+          </div>
+          <pre id="doc-modal-content" class="doc-modal-content"></pre>
+        </div>
+      </div>
+    """
+
+
+def _incoming_resource_queue_css() -> str:
+    """Shared styling for the Upload Pipeline incoming queue and document modal."""
+    return """
+      .incoming-queue-section {
+        border: 1px solid rgba(0, 242, 255, 0.2);
+        border-radius: 4px;
+        background: #0d1c2d;
+        padding: 14px;
+        min-width: 0;
+      }
+      .incoming-queue-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 14px;
+        margin-bottom: 12px;
+      }
+      .incoming-queue-head h3 {
+        margin: 0 0 5px;
+        font-size: 15px;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: #91f8ff;
+      }
+      .incoming-queue-head p {
+        margin: 0;
+        max-width: 720px;
+        color: #91a9c4;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .incoming-queue-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        max-height: 720px;
+        overflow-y: auto;
+        min-width: 0;
+        padding-right: 3px;
+      }
+      .incoming-resource-item {
+        border: 1px solid rgba(0, 242, 255, 0.2);
+        border-radius: 4px;
+        padding: 12px;
+        background: rgba(5, 14, 24, 0.78);
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+      }
+      .resource-header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: start;
+        min-width: 0;
+      }
+      .resource-title-line {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 7px;
+        min-width: 0;
+      }
+      .resource-name {
+        font-size: 14px;
+        font-weight: 800;
+        color: #e8f5ff;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .resource-manifest {
+        font-size: 10px;
+        color: #8fa8c4;
+        padding: 2px 6px;
+        border-radius: 4px;
+        background: rgba(0, 242, 255, 0.1);
+        overflow-wrap: anywhere;
+      }
+      .resource-status {
+        font-size: 10px;
+        padding: 3px 7px;
+        border-radius: 4px;
+        white-space: nowrap;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+      }
+      .resource-status.analyzed { background: rgba(0, 255, 159, 0.15); color: #00ff9f; }
+      .resource-status.not-analyzed { background: rgba(255, 200, 87, 0.15); color: #ffc857; }
+      .resource-meta-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 10px;
+        color: #7f99b2;
+        font-size: 10px;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+      }
+      .resource-badges {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        min-width: 0;
+      }
+      .analysis-badge, .staging-badge, .analysis-action {
+        padding: 3px 7px;
+        border-radius: 4px;
+        font-size: 10px;
+        font-weight: 800;
+        border: 1px solid rgba(0, 242, 255, 0.2);
+        line-height: 1.25;
+      }
+      .analysis-badge { background: rgba(0, 242, 255, 0.12); color: #7cecff; }
+      .analysis-badge.framework { color: #d2a6ff; border-color: rgba(210, 166, 255, 0.32); background: rgba(210, 166, 255, 0.12); }
+      .analysis-badge.inventory { color: #00ff9f; border-color: rgba(0, 255, 159, 0.3); background: rgba(0, 255, 159, 0.12); }
+      .analysis-badge.target { color: #ffc857; border-color: rgba(255, 200, 87, 0.3); background: rgba(255, 200, 87, 0.12); }
+      .analysis-badge.database { color: #73bfff; border-color: rgba(115, 191, 255, 0.3); background: rgba(115, 191, 255, 0.12); }
+      .analysis-badge.risk { border-color: rgba(255, 140, 162, 0.32); background: rgba(255, 95, 122, 0.12); }
+      .analysis-action { color: #d8ecff; background: rgba(0, 242, 255, 0.08); }
+      .staging-badge.staged { color: #7cecff; background: rgba(0, 242, 255, 0.12); }
+      .staging-badge.ready { color: #00ff9f; background: rgba(0, 255, 159, 0.12); }
+      .staging-badge.modified { color: #ffc857; background: rgba(255, 200, 87, 0.12); }
+      .staging-badge.approved { color: #00ff9f; background: rgba(0, 255, 159, 0.2); }
+      .staging-badge.rejected { color: #ff5f7a; background: rgba(255, 95, 122, 0.18); }
+      .resource-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        min-width: 0;
+      }
+      .resource-actions .button {
+        min-height: 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .incoming-queue-loading, .incoming-queue-error, .incoming-queue-empty {
+        padding: 14px;
+        border: 1px dashed rgba(0, 242, 255, 0.2);
+        border-radius: 4px;
+        color: #8fa8c4;
+        text-align: center;
+        font-size: 12px;
+      }
+      .incoming-queue-error { color: #ff5f7a; }
+
+      .doc-modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(2, 10, 20, 0.82);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 2000;
+        padding: 16px;
+      }
+      .doc-modal-overlay.open { display: flex; }
+      .doc-modal {
+        width: min(1180px, 98vw);
+        max-height: 92vh;
+        background: #0d1c2d;
+        border: 1px solid rgba(0, 242, 255, 0.22);
+        border-radius: 4px;
+        box-shadow: 0 0 20px rgba(0, 242, 255, 0.08);
+        display: flex;
+        flex-direction: column;
+      }
+      .doc-modal-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        padding: 10px;
+        border-bottom: 1px solid rgba(0, 242, 255, 0.22);
+        gap: 10px;
+      }
+      .doc-modal-title { margin: 0; font-size: 13px; color: #d8f2ff; }
+      .doc-modal-meta { margin: 3px 0 0; font-size: 11px; color: #8da8c5; }
+      .doc-modal-actions { display: flex; gap: 6px; }
+      .doc-modal-content {
+        margin: 0;
+        padding: 10px;
+        overflow: auto;
+        max-height: 76vh;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 12px;
+        line-height: 1.45;
+        color: #e7edf8;
+        background: rgba(4, 11, 21, 0.7);
+      }
+      @media (max-width: 1320px) {
+        .incoming-queue-list { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 760px) {
+        .incoming-queue-head { flex-direction: column; }
+        .resource-header { grid-template-columns: 1fr; }
+        .resource-status { width: fit-content; }
+      }
+    """
+
+
+def _incoming_resource_queue_js(incoming_resources_json: str) -> str:
+    """Render queue behavior for analysis, patch plans, prompts, and staging."""
+    return '''
+      <script>
+      (function() {
+        const incomingResourcesData = ''' + incoming_resources_json + ''';
+        const ANALYSIS_ACTION_LABELS = {
+          "safe": "Ready for staging",
+          "manual-sql": "SQL needs review",
+          "review-required": "Risk - review needed",
+          "adaptation-needed": "Adaptation needed",
+        };
+
+        function escapeHtml(value) {
+          return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+        }
+
+        function getDocModalNodes() {
+          return {
+            overlay: document.getElementById("doc-modal-overlay"),
+            title: document.getElementById("doc-modal-title"),
+            meta: document.getElementById("doc-modal-meta"),
+            content: document.getElementById("doc-modal-content"),
+            copyBtn: document.getElementById("doc-modal-copy-btn"),
+            closeBtn: document.getElementById("doc-modal-close-btn"),
+          };
+        }
+
+        function closeDocumentModal() {
+          const nodes = getDocModalNodes();
+          if (!nodes.overlay) return;
+          nodes.overlay.classList.remove("open");
+          nodes.overlay.setAttribute("aria-hidden", "true");
+        }
+
+        function openDocumentModal(title, meta, contentText) {
+          const nodes = getDocModalNodes();
+          if (!nodes.overlay || !nodes.title || !nodes.meta || !nodes.content || !nodes.copyBtn) return;
+          nodes.title.textContent = title || "Document";
+          nodes.meta.textContent = meta || "";
+          nodes.content.textContent = contentText || "";
+          nodes.overlay.classList.add("open");
+          nodes.overlay.setAttribute("aria-hidden", "false");
+          nodes.copyBtn.onclick = () => {
+            const text = nodes.content.textContent || "";
+            navigator.clipboard.writeText(text).then(() => alert("Copied.")).catch(() => alert("Copy failed."));
+          };
+          nodes.content.scrollTop = 0;
+        }
+
+        function wireDocumentModalBehavior() {
+          const nodes = getDocModalNodes();
+          if (!nodes.overlay || !nodes.closeBtn) return;
+          nodes.closeBtn.addEventListener("click", closeDocumentModal);
+          nodes.overlay.addEventListener("click", (event) => {
+            if (event.target === nodes.overlay) closeDocumentModal();
+          });
+          document.addEventListener("keydown", (event) => {
+            if (event.key === "Escape" && nodes.overlay.classList.contains("open")) closeDocumentModal();
+          });
+        }
+
+        async function openPatchPlanModal(scriptName) {
+          const response = await fetch("/api/analysis/" + encodeURIComponent(scriptName) + "/patch-plan/md", { method: "GET" });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.detail || body.error || "Patch plan not found");
+          openDocumentModal("Patch Plan", "Resource: " + scriptName, body.content || "No patch plan content.");
+        }
+
+        async function openPromptModal(promptType) {
+          const endpoint = promptType === "opencode" ? "/api/prompts/opencode-next" : "/api/prompts/codex-audit-next";
+          const title = promptType === "opencode" ? "OpenCode Prompt" : "Codex Audit Prompt";
+          const response = await fetch(endpoint, { method: "GET" });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.detail || body.error || "Prompt not available");
+          openDocumentModal(title, "Generated: " + (body.generated_at || "unknown"), body.content || "");
+        }
+
+        function stagingDiffText(diff) {
+          const lines = [];
+          const safeDiff = diff || {};
+          const summary = safeDiff.summary || {};
+          lines.push("Resource: " + String(safeDiff.resource || "unknown"));
+          lines.push("Status: " + String(safeDiff.status || "UNKNOWN"));
+          lines.push("");
+          lines.push("Changed files (" + String(summary.changed || 0) + "):");
+          for (const p of (safeDiff.changed_files || [])) lines.push("  - " + p);
+          if (!(safeDiff.changed_files || []).length) lines.push("  - none");
+          lines.push("");
+          lines.push("Added files (" + String(summary.added || 0) + "):");
+          for (const p of (safeDiff.added_files || [])) lines.push("  - " + p);
+          if (!(safeDiff.added_files || []).length) lines.push("  - none");
+          lines.push("");
+          lines.push("Deleted files (" + String(summary.deleted || 0) + "):");
+          for (const p of (safeDiff.deleted_files || [])) lines.push("  - " + p);
+          if (!(safeDiff.deleted_files || []).length) lines.push("  - none");
+          return lines.join("\\n");
+        }
+
+        function getRiskColor(risk) {
+          if (risk === "high") return "var(--ao-danger)";
+          if (risk === "medium") return "#fbbf24";
+          return "var(--ao-green)";
+        }
+
+        function getActionLabel(recommendedAction) {
+          return ANALYSIS_ACTION_LABELS[recommendedAction] || recommendedAction || "Ready";
+        }
+
+        function riskFromFindings(findings) {
+          let risk = "low";
+          for (const finding of (findings || [])) {
+            if (finding && finding.severity === "high") {
+              risk = "high";
+              break;
+            }
+            if (finding && finding.severity === "medium" && risk !== "high") risk = "medium";
+          }
+          return risk;
+        }
+
+        function summaryFromAnalysis(analysis) {
+          if (analysis && analysis.summary) return analysis.summary;
+          const markers = (analysis && analysis.markers) || {};
+          return {
+            framework: Object.keys(markers.framework || {}).join(", ") || "standalone",
+            inventory: Object.keys(markers.inventory || {}).join(", ") || "none",
+            target: Object.keys(markers.target || {}).join(", ") || "none",
+            database: Object.keys(markers.database || {}).join(", ") || "none",
+            risk: riskFromFindings(analysis && analysis.findings),
+          };
+        }
+
+        function summaryBadgesHtml(summary) {
+          const safeSummary = summary || {};
+          const framework = safeSummary.framework || "standalone";
+          const inventory = safeSummary.inventory || "none";
+          const target = safeSummary.target || "none";
+          const database = safeSummary.database || "none";
+          const risk = safeSummary.risk || "low";
+          return `
+            <span class="analysis-badge framework">${escapeHtml(framework)}</span>
+            <span class="analysis-badge inventory">${escapeHtml(inventory)}</span>
+            <span class="analysis-badge target">${escapeHtml(target)}</span>
+            <span class="analysis-badge database">${escapeHtml(database)}</span>
+            <span class="analysis-badge risk" style="color:${getRiskColor(risk)}">Risk: ${escapeHtml(risk)}</span>
+          `;
+        }
+
+        function normalizedStageStatus(resource) {
+          const raw = String((resource && resource.staging && resource.staging.status) || "NONE").toUpperCase();
+          if (["STAGED", "READY", "MODIFIED", "APPROVED", "REJECTED"].includes(raw)) return raw;
+          return "NONE";
+        }
+
+        function stageBadgeHtml(resource) {
+          const status = normalizedStageStatus(resource);
+          if (status === "NONE") return "";
+          return `<span class="staging-badge ${escapeHtml(status.toLowerCase())}">${escapeHtml(status)}</span>`;
+        }
+
+        function postStageButtonsHtml(name) {
+          return `
+            <button class="button secondary view-staging-diff-btn" data-script="${escapeHtml(name)}">View Staging Diff</button>
+            <button class="button secondary approve-staging-btn" data-script="${escapeHtml(name)}">Approve For Apply</button>
+            <button class="button secondary delete-staging-btn" data-script="${escapeHtml(name)}">Delete Staging Copy</button>
+          `;
+        }
+
+        function resourceHasPatchPlan(scriptName) {
+          const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+          return !!(resource && resource.has_patch_plan);
+        }
+
+        function resourceHasStaging(scriptName) {
+          const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+          return !!(resource && resource.staging && resource.staging.exists);
+        }
+
+        function findResourceItemByName(scriptName) {
+          const items = document.querySelectorAll(".incoming-resource-item");
+          for (const item of items) {
+            if ((item.dataset && item.dataset.name) === scriptName) return item;
+          }
+          return null;
+        }
+
+        function scanStateFor(resource) {
+          if (resource && resource.staging && resource.staging.exists) return String(resource.staging.status || "STAGED").toUpperCase();
+          if (resource && resource.has_patch_plan) return "PATCH_READY";
+          if (resource && resource.analyzed) return "ANALYZED";
+          return "PENDING_SCAN";
+        }
+
+        function renderIncomingResources() {
+          const container = document.getElementById("incoming-queue-list");
+          const loading = document.getElementById("incoming-queue-loading");
+          const empty = document.getElementById("incoming-queue-empty");
+          if (!container || !loading || !empty) return;
+
+          if (!incomingResourcesData || incomingResourcesData.length === 0) {
+            loading.style.display = "none";
+            empty.style.display = "block";
+            return;
+          }
+
+          loading.style.display = "none";
+          empty.style.display = "none";
+
+          container.innerHTML = incomingResourcesData.map(resource => {
+            let badgesHtml = "";
+            if (resource.analyzed && resource.analysis) {
+              badgesHtml = summaryBadgesHtml(summaryFromAnalysis(resource.analysis));
+            } else {
+              badgesHtml = '<span class="analysis-badge">Scan pending</span>';
+            }
+            badgesHtml += stageBadgeHtml(resource);
+
+            const statusHtml = resource.analyzed
+              ? `<span class="resource-status analyzed">Analyzed</span>`
+              : `<span class="resource-status not-analyzed">Not analyzed</span>`;
+            const patchPlanActions = resource.analyzed
+              ? `<button class="button secondary generate-plan-btn" data-script="${escapeHtml(resource.name)}">Generate Patch Plan</button>
+                 <button class="button secondary view-plan-btn" data-script="${escapeHtml(resource.name)}">View Patch Plan</button>`
+              : "";
+            const promptActions = (resource.analyzed && resource.has_patch_plan)
+              ? `<button class="button secondary generate-opencode-prompt-btn" data-script="${escapeHtml(resource.name)}">Generate OpenCode Prompt</button>
+                 <button class="button secondary view-opencode-prompt-btn" data-script="${escapeHtml(resource.name)}">View OpenCode Prompt</button>
+                 <button class="button secondary view-codex-prompt-btn" data-script="${escapeHtml(resource.name)}">View Codex Audit Prompt</button>`
+              : "";
+            const stagingActions = resource.analyzed
+              ? (resource.staging && resource.staging.exists
+                  ? postStageButtonsHtml(resource.name)
+                  : `<button class="button secondary stage-safe-copy-btn" data-script="${escapeHtml(resource.name)}">Stage Safe Copy</button>`)
+              : "";
+            const analyzedAction = resource.analyzed && resource.analysis
+              ? `<span class="analysis-action">${escapeHtml(getActionLabel((resource.analysis.summary || {}).recommended_action || "safe"))}</span>`
+              : "";
+
+            return `
+              <div class="incoming-resource-item" data-name="${escapeHtml(resource.name)}">
+                <div class="resource-header">
+                  <div>
+                    <div class="resource-title-line">
+                      <span class="resource-name">${escapeHtml(resource.name)}</span>
+                      <span class="resource-manifest">${escapeHtml(resource.manifest || "No manifest")}</span>
+                    </div>
+                    <div class="resource-meta-row">
+                      <span>${escapeHtml(resource.file_count || 0)} files</span>
+                      <span>${escapeHtml(scanStateFor(resource))}</span>
+                      <span>${escapeHtml(resource.updated_at || "unknown")}</span>
+                    </div>
+                  </div>
+                  ${statusHtml}
+                </div>
+                <div class="resource-badges">${badgesHtml}${analyzedAction}</div>
+                <div class="resource-actions">
+                  <button class="button analyze-btn" data-script="${escapeHtml(resource.name)}">${resource.analyzed ? "Re-analyze" : "Analyze"}</button>
+                  ${resource.analyzed ? `<button class="button secondary view-report-btn" data-script="${escapeHtml(resource.name)}">View Report</button>` : ""}
+                  ${patchPlanActions}
+                  ${promptActions}
+                  ${stagingActions}
+                </div>
+              </div>
+            `;
+          }).join("");
+        }
+
+        async function analyzeResource(scriptName, button) {
+          const original = button.textContent;
+          button.disabled = true;
+          button.textContent = "Analyzing...";
+          try {
+            const response = await fetch("/api/incoming/" + encodeURIComponent(scriptName) + "/analyze", { method: "POST" });
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.detail || body.error || "Analysis failed");
+            if (body.status === "success" && body.summary) {
+              const s = body.summary;
+              const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+              if (resource) {
+                resource.analyzed = true;
+                resource.analysis = resource.analysis || {};
+                resource.analysis.markers = resource.analysis.markers || {};
+                resource.analysis.summary = s;
+              }
+              const item = findResourceItemByName(scriptName);
+              if (item) {
+                const badges = item.querySelector(".resource-badges");
+                badges.innerHTML = summaryBadgesHtml(s) + `<span class="analysis-action">${escapeHtml(getActionLabel(s.recommended_action))}</span>` + (resource ? stageBadgeHtml(resource) : "");
+                const status = item.querySelector(".resource-status");
+                if (status) {
+                  status.className = "resource-status analyzed";
+                  status.textContent = "Analyzed";
+                }
+                const actions = item.querySelector(".resource-actions");
+                const promptActions = resourceHasPatchPlan(scriptName)
+                  ? `<button class="button secondary generate-opencode-prompt-btn" data-script="${escapeHtml(scriptName)}">Generate OpenCode Prompt</button>
+                     <button class="button secondary view-opencode-prompt-btn" data-script="${escapeHtml(scriptName)}">View OpenCode Prompt</button>
+                     <button class="button secondary view-codex-prompt-btn" data-script="${escapeHtml(scriptName)}">View Codex Audit Prompt</button>`
+                  : "";
+                const stageActions = resourceHasStaging(scriptName) ? postStageButtonsHtml(scriptName) : `<button class="button secondary stage-safe-copy-btn" data-script="${escapeHtml(scriptName)}">Stage Safe Copy</button>`;
+                actions.innerHTML = `
+                  <button class="button analyze-btn" data-script="${escapeHtml(scriptName)}">Re-analyze</button>
+                  <button class="button secondary view-report-btn" data-script="${escapeHtml(scriptName)}">View Report</button>
+                  <button class="button secondary generate-plan-btn" data-script="${escapeHtml(scriptName)}">Generate Patch Plan</button>
+                  <button class="button secondary view-plan-btn" data-script="${escapeHtml(scriptName)}">View Patch Plan</button>
+                  ${promptActions}
+                  ${stageActions}
+                `;
+              }
+            } else {
+              throw new Error(body.error || "Analysis failed");
+            }
+          } catch (error) {
+            alert("Analysis failed: " + String(error.message || error));
+            button.textContent = original;
+            button.disabled = false;
+          }
+        }
+
+        document.addEventListener("click", function(event) {
+          const analyzeBtn = event.target.closest(".analyze-btn");
+          if (analyzeBtn) {
+            analyzeResource(analyzeBtn.dataset.script, analyzeBtn);
+            return;
+          }
+
+          const viewBtn = event.target.closest(".view-report-btn");
+          if (viewBtn) {
+            window.location.href = "/dashboard-v2/report/" + encodeURIComponent(viewBtn.dataset.script);
+            return;
+          }
+
+          const generatePlanBtn = event.target.closest(".generate-plan-btn");
+          if (generatePlanBtn) {
+            const scriptName = generatePlanBtn.dataset.script;
+            const original = generatePlanBtn.textContent;
+            generatePlanBtn.disabled = true;
+            generatePlanBtn.textContent = "Generating...";
+            fetch("/api/analysis/" + encodeURIComponent(scriptName) + "/generate-patch-plan", { method: "POST" })
+              .then(async (response) => {
+                const body = await response.json();
+                if (!response.ok) throw new Error(body.detail || body.error || "Failed to generate patch plan");
+                alert("Patch plan generated for " + scriptName);
+                const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+                if (resource) resource.has_patch_plan = true;
+                renderIncomingResources();
+              })
+              .catch((error) => alert("Patch plan generation failed: " + String(error.message || error)))
+              .finally(() => {
+                generatePlanBtn.disabled = false;
+                generatePlanBtn.textContent = original;
+              });
+            return;
+          }
+
+          const viewPlanBtn = event.target.closest(".view-plan-btn");
+          if (viewPlanBtn) {
+            openPatchPlanModal(viewPlanBtn.dataset.script).catch((error) => alert("View patch plan failed: " + String(error.message || error)));
+            return;
+          }
+
+          const generatePromptBtn = event.target.closest(".generate-opencode-prompt-btn");
+          if (generatePromptBtn) {
+            const scriptName = generatePromptBtn.dataset.script;
+            const original = generatePromptBtn.textContent;
+            generatePromptBtn.disabled = true;
+            generatePromptBtn.textContent = "Generating...";
+            fetch("/api/patch-plan/" + encodeURIComponent(scriptName) + "/generate-opencode-prompt", { method: "POST" })
+              .then(async (response) => {
+                const body = await response.json();
+                if (!response.ok) throw new Error(body.detail || body.error || "Failed to generate prompts");
+                alert("OpenCode and Codex prompts generated for " + scriptName);
+              })
+              .catch((error) => alert("Prompt generation failed: " + String(error.message || error)))
+              .finally(() => {
+                generatePromptBtn.disabled = false;
+                generatePromptBtn.textContent = original;
+              });
+            return;
+          }
+
+          const stageSafeCopyBtn = event.target.closest(".stage-safe-copy-btn");
+          if (stageSafeCopyBtn) {
+            const scriptName = stageSafeCopyBtn.dataset.script;
+            const original = stageSafeCopyBtn.textContent;
+            stageSafeCopyBtn.disabled = true;
+            stageSafeCopyBtn.textContent = "Staging...";
+            fetch("/api/staging/" + encodeURIComponent(scriptName) + "/create", { method: "POST" })
+              .then(async (response) => {
+                const body = await response.json();
+                if (!response.ok) throw new Error(body.detail || body.error || "Failed to create staging copy");
+                const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+                if (resource) resource.staging = { exists: true, status: String(body.staging_status || "STAGED"), approved_at: null };
+                renderIncomingResources();
+              })
+              .catch((error) => alert("Stage Safe Copy failed: " + String(error.message || error)))
+              .finally(() => {
+                stageSafeCopyBtn.disabled = false;
+                stageSafeCopyBtn.textContent = original;
+              });
+            return;
+          }
+
+          const viewStagingDiffBtn = event.target.closest(".view-staging-diff-btn");
+          if (viewStagingDiffBtn) {
+            const scriptName = viewStagingDiffBtn.dataset.script;
+            fetch("/api/staging/" + encodeURIComponent(scriptName) + "/diff", { method: "GET" })
+              .then(async (response) => {
+                const body = await response.json();
+                if (!response.ok) throw new Error(body.detail || body.error || "Failed to load staging diff");
+                const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+                if (resource && resource.staging) resource.staging.status = String(body.status || resource.staging.status || "READY");
+                openDocumentModal("Staging Diff", "Resource: " + scriptName, stagingDiffText(body));
+                renderIncomingResources();
+              })
+              .catch((error) => alert("View staging diff failed: " + String(error.message || error)));
+            return;
+          }
+
+          const approveStagingBtn = event.target.closest(".approve-staging-btn");
+          if (approveStagingBtn) {
+            const scriptName = approveStagingBtn.dataset.script;
+            fetch("/api/staging/" + encodeURIComponent(scriptName) + "/approve", { method: "POST" })
+              .then(async (response) => {
+                const body = await response.json();
+                if (!response.ok) throw new Error(body.detail || body.error || "Approval failed");
+                const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+                if (resource) {
+                  resource.staging = resource.staging || {};
+                  resource.staging.exists = true;
+                  resource.staging.status = "APPROVED";
+                  resource.staging.approved_at = body.approved_at || null;
+                }
+                renderIncomingResources();
+              })
+              .catch((error) => alert("Approve staging failed: " + String(error.message || error)));
+            return;
+          }
+
+          const deleteStagingBtn = event.target.closest(".delete-staging-btn");
+          if (deleteStagingBtn) {
+            const scriptName = deleteStagingBtn.dataset.script;
+            fetch("/api/staging/" + encodeURIComponent(scriptName), { method: "DELETE" })
+              .then(async (response) => {
+                const body = await response.json();
+                if (!response.ok) throw new Error(body.detail || body.error || "Delete staging failed");
+                const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
+                if (resource) resource.staging = { exists: false, status: "NONE", approved_at: null };
+                renderIncomingResources();
+              })
+              .catch((error) => alert("Delete staging copy failed: " + String(error.message || error)));
+            return;
+          }
+
+          const viewOpenCodePromptBtn = event.target.closest(".view-opencode-prompt-btn");
+          if (viewOpenCodePromptBtn) {
+            openPromptModal("opencode").catch((error) => alert("View OpenCode prompt failed: " + String(error.message || error)));
+            return;
+          }
+
+          const viewCodexPromptBtn = event.target.closest(".view-codex-prompt-btn");
+          if (viewCodexPromptBtn) {
+            openPromptModal("codex").catch((error) => alert("View Codex prompt failed: " + String(error.message || error)));
+          }
+        });
+
+        wireDocumentModalBehavior();
+        renderIncomingResources();
+      })();
+      </script>
+    '''
+
+
 @app.get("/dashboard-v2", response_class=HTMLResponse)
 def super_dashboard() -> str:
-    from apps.shared_layout import render_layout, layout_css
+    try:
+        from apps.shared_layout import render_cyber_layout
+        use_cyber = True
+    except ImportError:
+        from apps.shared_layout import render_layout
+        use_cyber = False
 
     orchestrator_available = False
     tasks_data = {"active": [], "paused": [], "completed": [], "failed": []}
@@ -2864,10 +3586,7 @@ def super_dashboard() -> str:
     fivem_server_path = _detect_fivem_server_path()
     analysis_exists = _analysis_artifacts_exist()
     next_action = _next_recommended_action(incoming_path, incoming_entries_count, analysis_exists)
-    # AGENTOS INCOMING RESOURCE QUEUE START
-    incoming_resources = _get_incoming_resources_with_analysis(limit=15)
-    incoming_resources_json = json.dumps(incoming_resources)
-    # AGENTOS INCOMING RESOURCE QUEUE END
+    incoming_resources = _get_incoming_resources_with_analysis(limit=8)
     # AGENTOS FIVEM CONTROL CENTER END
 
     try:
@@ -3057,781 +3776,695 @@ def super_dashboard() -> str:
     if not execution_html:
         execution_html = '<div class="empty-state">No execution states</div>'
 
-    connection_status = "online" if orchestrator_available else "disconnected"
     connection_class = "online" if orchestrator_available else "offline"
 
+    focus_resource = (
+        next((r for r in incoming_resources if isinstance(r.get("staging"), dict) and r.get("staging", {}).get("exists")), None)
+        or next((r for r in incoming_resources if r.get("has_patch_plan")), None)
+        or next((r for r in incoming_resources if r.get("analyzed")), None)
+        or (incoming_resources[0] if incoming_resources else None)
+    )
+    focus_name = str(focus_resource.get("name", "No active resource")) if focus_resource else "No active resource"
+    focus_stage = "Idle"
+    focus_progress = 0
+    focus_agent = "No active agent"
+    focus_model = "Not selected"
+    focus_risk = "unknown"
+    focus_files = "0 live files"
+    if focus_resource:
+        focus_files = f"0 live / {int(focus_resource.get('file_count', 0))} incoming"
+        analysis = focus_resource.get("analysis") if isinstance(focus_resource.get("analysis"), dict) else {}
+        findings = analysis.get("findings", []) if isinstance(analysis, dict) else []
+        focus_risk = "low"
+        for finding in findings:
+            severity = str(finding.get("severity", "")).lower() if isinstance(finding, dict) else ""
+            if severity == "high":
+                focus_risk = "high"
+                break
+            if severity == "medium" and focus_risk != "high":
+                focus_risk = "medium"
+        staging = focus_resource.get("staging") if isinstance(focus_resource.get("staging"), dict) else {}
+        if staging.get("exists"):
+            focus_stage = str(staging.get("status") or "STAGED").upper()
+            focus_progress = 78 if focus_stage != "APPROVED" else 92
+            focus_agent = "StageSafe Orchestrator"
+            focus_model = "Rule-based safety runner"
+        elif focus_resource.get("has_patch_plan"):
+            focus_stage = "Patch plan ready"
+            focus_progress = 64
+            focus_agent = "Patch Plan Generator"
+            focus_model = "Static report model"
+        elif focus_resource.get("analyzed"):
+            focus_stage = "Analysis complete"
+            focus_progress = 46
+            focus_agent = "ScriptScanner"
+            focus_model = "Read-only analyzer"
+        else:
+            focus_stage = "Awaiting analysis"
+            focus_progress = 22
+            focus_agent = "Upload Intake"
+            focus_model = "Not active"
+    active_task_summary = (
+        f'{tasks_data["active"][0]["name"]} ({tasks_data["active"][0]["status"]})'
+        if tasks_data["active"]
+        else next_action
+    )
+    focus_eta = "Ready for review" if focus_progress >= 90 else "Monitoring active stage" if focus_progress else "Waiting for intake"
+    operation_log_lines = []
+    for te in timelines_data[:4]:
+        operation_log_lines.append(
+            f'{te.get("task_id", "task")} {te.get("event", "event")} {te.get("step_name", "")[:32]}'.strip()
+        )
+    if not operation_log_lines and latest_health_check_logs:
+        operation_log_lines = latest_health_check_logs[-4:]
+    if not operation_log_lines:
+        operation_log_lines = ["No active operation stream. Upload Pipeline is standing by."]
+    operation_logs_html = "".join(f"<span>{html.escape(line)}</span>" for line in operation_log_lines)
+
     content = f'''
-    <div class="super-header">
-        <div class="super-title">
-            <h1>AgentOS FiveM Control Center</h1>
-            <p>Upload, analyze, stage, approve, and integrate FiveM scripts safely.</p>
-        </div>
-        <div class="connection-indicator {connection_class}">
-            <span class="connection-dot"></span>
-            { "Connected to Orchestrator" if orchestrator_available else "Orchestrator Unavailable" }
-        </div>
-    </div>
-
-    <section class="section workflow-section">
-        <h2><span class="section-icon">🧭</span>FiveM Integration Workflow</h2>
-        <div class="workflow-steps">
-            <span class="workflow-step">1 Upload Script</span>
-            <span class="workflow-step">2 Analyze</span>
-            <span class="workflow-step">3 Review Patch Plan</span>
-            <span class="workflow-step">4 Approve</span>
-            <span class="workflow-step">5 Stage</span>
-            <span class="workflow-step">6 Apply</span>
-            <span class="workflow-step">7 Test Server</span>
-            <span class="workflow-step">8 Push Git</span>
-        </div>
-    </section>
-
-    <section class="section fivem-focus-grid">
-        <div class="focus-card">
-            <h3>Upload FiveM Script</h3>
-            <p>Upload a ZIP or resource folder for analysis before touching the live server.</p>
-            <a class="button" href="/upload">Open Upload Pipeline</a>
-        </div>
-        <div class="focus-card">
-            <h3>Incoming Scripts</h3>
-            <p>{html.escape(incoming_path) if incoming_path else "No incoming folder detected."}</p>
-            <p class="focus-meta">{incoming_entries_count} item(s) detected</p>
-        </div>
-        <div class="focus-card">
-            <h3>FiveM Server Target</h3>
-            <p>{html.escape(fivem_server_path) if fivem_server_path else "Server path not configured."}</p>
-        </div>
-        <div class="focus-card">
-            <h3>Next Recommended Action</h3>
-            <p>{html.escape(next_action)}</p>
-        </div>
-    </section>
-
-    <section class="section incoming-queue-section" id="incoming-queue">
-        <h2><span class="section-icon">📥</span>Incoming Resource Queue</h2>
-        <div class="incoming-queue-loading" id="incoming-queue-loading">Loading incoming resources...</div>
-        <div class="incoming-queue-error" id="incoming-queue-error" style="display:none;">Failed to load resources</div>
-        <div class="incoming-queue-empty" id="incoming-queue-empty" style="display:none;">No incoming resources found</div>
-        <div class="incoming-queue-list" id="incoming-queue-list"></div>
-    </section>
-
-    <section class="status-grid">
-        <div class="status-card">
-            <div class="status-label">AgentOS</div>
-            <div class="status-value {connection_class}">{ "Online" if orchestrator_available else "Disconnected" }</div>
-        </div>
-        <div class="status-card">
-            <div class="status-label">Active Tasks</div>
-            <div class="status-value">{stats["active"]}</div>
-        </div>
-        <div class="status-card">
-            <div class="status-label">Paused (Awaiting Approval)</div>
-            <div class="status-value warning">{stats["paused"]}</div>
-        </div>
-        <div class="status-card">
-            <div class="status-label">Completed</div>
-            <div class="status-value success">{stats["completed"]}</div>
-        </div>
-        <div class="status-card">
-            <div class="status-label">Failed</div>
-            <div class="status-value danger">{stats["failed"]}</div>
-        </div>
-    </section>
-
-    <div class="dashboard-grid">
-        <section class="section tasks-section">
-            <h2><span class="section-icon">▶️</span>Active Tasks</h2>
-            <div class="task-list">{active_tasks_html}</div>
+    <div class="mc-shell">
+        <section class="mc-header">
+            <div class="mc-title">
+                <h1>ORCHESTRATOR_V1</h1>
+                <p class="mc-subtitle">FiveM_AI_IDE / Instance Alpha-9 / Mission Control</p>
+            </div>
+            <div class="mc-connection {connection_class}">
+                <span class="connection-dot"></span>
+                { "CORE LINK ONLINE" if orchestrator_available else "CORE LINK DEGRADED" }
+            </div>
         </section>
 
-        <section class="section tasks-section">
-            <h2><span class="section-icon">⏸️</span>Paused (Awaiting Approval)</h2>
-            <div class="task-list">{paused_tasks_html}</div>
+        <section class="mc-status-grid">
+            <div class="mc-status-card"><span class="mc-status-label">Connection</span><strong class="{connection_class}">{ "ONLINE" if orchestrator_available else "OFFLINE" }</strong></div>
+            <div class="mc-status-card"><span class="mc-status-label">Active</span><strong>{stats["active"]}</strong></div>
+            <div class="mc-status-card"><span class="mc-status-label">Paused</span><strong class="warning">{stats["paused"]}</strong></div>
+            <div class="mc-status-card"><span class="mc-status-label">Completed</span><strong class="success">{stats["completed"]}</strong></div>
+            <div class="mc-status-card"><span class="mc-status-label">Failed</span><strong class="danger">{stats["failed"]}</strong></div>
         </section>
 
-        <section class="section tasks-section">
-            <h2><span class="section-icon">✅</span>Completed</h2>
-            <div class="task-list">{completed_tasks_html}</div>
-        </section>
-
-        <section class="section tasks-section">
-            <h2><span class="section-icon">🧪</span>Health Check Dashboard V2 Logs</h2>
-            <div class="task-list">{health_check_logs_html}</div>
-        </section>
-
-        <section class="section approvals-section">
-            <h2><span class="section-icon">🔐</span>Approval Queue</h2>
-            <div class="approval-list">{approvals_html}</div>
-        </section>
-
-        <section class="section timelines-section">
-            <h2><span class="section-icon">📜</span>Execution Timelines</h2>
-            <div class="timeline-list">{timelines_html}</div>
-        </section>
-
-        <section class="section blocked-section">
-            <h2><span class="section-icon">🚫</span>Blocked Operations</h2>
-            <div class="blocked-list">{blocked_html}</div>
-        </section>
-
-        <section class="section audit-section">
-            <h2><span class="section-icon">📋</span>Audit Logs</h2>
-            <div class="audit-list">{audit_html}</div>
-        </section>
-
-        <section class="section risk-section">
-            <h2><span class="section-icon">⚠️</span>Risk Distribution</h2>
-            <div class="risk-bars">
-                <div class="risk-bar">
-                    <div class="risk-label">Safe</div>
-                    <div class="risk-track">
-                        <div class="risk-fill safe" style="width: { (risk_distribution['safe'] / max(stats['total'], 1)) * 100 }%"></div>
+        <section class="mc-dashboard-grid">
+            <article class="mc-panel mc-col-left">
+                <header class="mc-panel-header"><h2>Active Agents</h2></header>
+                <div class="mc-panel-body">
+                    <div class="mc-subpanel">
+                        <h3>Running Tasks</h3>
+                        <div class="task-list">{active_tasks_html}</div>
                     </div>
-                    <div class="risk-value">{risk_distribution['safe']}</div>
-                </div>
-                <div class="risk-bar">
-                    <div class="risk-label">Low</div>
-                    <div class="risk-track">
-                        <div class="risk-fill low" style="width: { (risk_distribution['low'] / max(stats['total'], 1)) * 100 }%"></div>
+                    <div class="mc-subpanel">
+                        <h3>Paused Queue</h3>
+                        <div class="task-list">{paused_tasks_html}</div>
                     </div>
-                    <div class="risk-value">{risk_distribution['low']}</div>
-                </div>
-                <div class="risk-bar">
-                    <div class="risk-label">Medium</div>
-                    <div class="risk-track">
-                        <div class="risk-fill medium" style="width: { (risk_distribution['medium'] / max(stats['total'], 1)) * 100 }%"></div>
+                    <div class="mc-subpanel">
+                        <h3>Approval Queue</h3>
+                        <div class="approval-list">{approvals_html}</div>
                     </div>
-                    <div class="risk-value">{risk_distribution['medium']}</div>
-                </div>
-                <div class="risk-bar">
-                    <div class="risk-label">High</div>
-                    <div class="risk-track">
-                        <div class="risk-fill high" style="width: { (risk_distribution['high'] / max(stats['total'], 1)) * 100 }%"></div>
+                    <div class="mc-subpanel">
+                        <h3>Completed</h3>
+                        <div class="task-list">{completed_tasks_html}</div>
                     </div>
-                    <div class="risk-value">{risk_distribution['high']}</div>
                 </div>
-                <div class="risk-bar">
-                    <div class="risk-label">Critical</div>
-                    <div class="risk-track">
-                        <div class="risk-fill critical" style="width: { (risk_distribution['critical'] / max(stats['total'], 1)) * 100 }%"></div>
+            </article>
+
+            <article class="mc-panel mc-col-center">
+                <header class="mc-panel-header"><h2>Live Pipeline</h2></header>
+                <div class="mc-panel-body">
+                    <div class="workflow-steps">
+                        <span class="workflow-step">1 Upload</span>
+                        <span class="workflow-step">2 Analyze</span>
+                        <span class="workflow-step">3 Patch Plan</span>
+                        <span class="workflow-step">4 Approve</span>
+                        <span class="workflow-step">5 Stage</span>
+                        <span class="workflow-step">6 Apply</span>
+                        <span class="workflow-step">7 Test</span>
+                        <span class="workflow-step">8 Push</span>
                     </div>
-                    <div class="risk-value">{risk_distribution['critical']}</div>
+                    <div class="mc-meta-grid">
+                        <div class="focus-card">
+                            <h3>Upload Pipeline</h3>
+                            <p>Intake ZIP/resource uploads before any live operations.</p>
+                            <a class="button" href="/upload">Open Upload Pipeline</a>
+                        </div>
+                        <div class="focus-card">
+                            <h3>Incoming Scripts</h3>
+                            <p>{html.escape(incoming_path) if incoming_path else "No incoming folder detected."}</p>
+                            <p class="focus-meta">{incoming_entries_count} item(s) detected</p>
+                        </div>
+                        <div class="focus-card">
+                            <h3>FiveM Target</h3>
+                            <p>{html.escape(fivem_server_path) if fivem_server_path else "Server path not configured."}</p>
+                        </div>
+                        <div class="focus-card">
+                            <h3>Next Action</h3>
+                            <p>{html.escape(next_action)}</p>
+                        </div>
+                    </div>
+                    <section class="operation-focus-panel" aria-label="Current Operation Focus">
+                        <div class="operation-focus-head">
+                            <span class="operation-live-dot"></span>
+                            <div>
+                                <h3>Current Operation Focus</h3>
+                                <p>Live AI orchestration overview. Detailed resource actions now live in Upload Pipeline.</p>
+                            </div>
+                        </div>
+                        <div class="operation-focus-main">
+                            <div>
+                                <span class="operation-label">Active Resource</span>
+                                <strong class="operation-resource">{html.escape(focus_name)}</strong>
+                                <p>{html.escape(active_task_summary)}</p>
+                            </div>
+                            <div class="operation-progress">
+                                <span>{html.escape(focus_stage)}</span>
+                                <div class="operation-track"><div class="operation-fill" style="width: {focus_progress}%"></div></div>
+                                <small>{focus_progress}% · {html.escape(focus_eta)}</small>
+                            </div>
+                        </div>
+                        <div class="operation-focus-grid">
+                            <div><span>Active Agent</span><strong>{html.escape(focus_agent)}</strong></div>
+                            <div><span>Reasoning Model</span><strong>{html.escape(focus_model)}</strong></div>
+                            <div><span>Risk Level</span><strong class="risk-{html.escape(focus_risk)}">{html.escape(focus_risk.upper())}</strong></div>
+                            <div><span>Files Modified</span><strong>{html.escape(focus_files)}</strong></div>
+                        </div>
+                        <div class="operation-log-stream">
+                            {operation_logs_html}
+                        </div>
+                    </section>
                 </div>
+            </article>
+
+            <article class="mc-panel mc-col-right">
+                <header class="mc-panel-header"><h2>System Pulse Feed</h2></header>
+                <div class="mc-panel-body">
+                    <div class="mc-subpanel">
+                        <h3>Execution Timelines</h3>
+                        <div class="timeline-list">{timelines_html}</div>
+                    </div>
+                    <div class="mc-subpanel">
+                        <h3>Audit Logs</h3>
+                        <div class="audit-list">{audit_html}</div>
+                    </div>
+                    <div class="mc-subpanel">
+                        <h3>Blocked Operations</h3>
+                        <div class="blocked-list">{blocked_html}</div>
+                    </div>
+                    <div class="mc-subpanel">
+                        <h3>Execution States</h3>
+                        <div class="execution-list">{execution_html}</div>
+                    </div>
+                    <div class="mc-subpanel">
+                        <h3>Health Logs</h3>
+                        {health_check_logs_html}
+                    </div>
+                </div>
+            </article>
+        </section>
+
+        <section class="mc-guard-strip">
+            <div class="guard-left">
+                <h3>Global System Guard</h3>
+                <p>Staging-only operations enabled. No live apply, no txAdmin automation, no automatic push.</p>
+                <div class="risk-bars">
+                    <div class="risk-bar"><span>SAFE</span><div class="risk-track"><div class="risk-fill safe" style="width: { (risk_distribution['safe'] / max(stats['total'], 1)) * 100 }%"></div></div><strong>{risk_distribution['safe']}</strong></div>
+                    <div class="risk-bar"><span>LOW</span><div class="risk-track"><div class="risk-fill low" style="width: { (risk_distribution['low'] / max(stats['total'], 1)) * 100 }%"></div></div><strong>{risk_distribution['low']}</strong></div>
+                    <div class="risk-bar"><span>MED</span><div class="risk-track"><div class="risk-fill medium" style="width: { (risk_distribution['medium'] / max(stats['total'], 1)) * 100 }%"></div></div><strong>{risk_distribution['medium']}</strong></div>
+                    <div class="risk-bar"><span>HIGH</span><div class="risk-track"><div class="risk-fill high" style="width: { (risk_distribution['high'] / max(stats['total'], 1)) * 100 }%"></div></div><strong>{risk_distribution['high']}</strong></div>
+                    <div class="risk-bar"><span>CRIT</span><div class="risk-track"><div class="risk-fill critical" style="width: { (risk_distribution['critical'] / max(stats['total'], 1)) * 100 }%"></div></div><strong>{risk_distribution['critical']}</strong></div>
+                </div>
+            </div>
+            <div class="guard-right">
+                <button class="health-check-button" type="button" onclick="runHealthCheckDashboardV2Task()">Run Global Guard Health Check</button>
             </div>
         </section>
 
-        <section class="section execution-section">
-            <h2><span class="section-icon">🔧</span>Execution States</h2>
-            <div class="execution-list">{execution_html}</div>
-        </section>
-    </div>
-
-    <section class="section">
-        <h2><span class="section-icon">📊</span>Task Distribution</h2>
-        <div class="distribution-bars">
-            <div class="dist-bar">
-                <div class="dist-label">Active</div>
-                <div class="dist-track">
-                    <div class="dist-fill active" style="width: { (stats['active'] / max(stats['total'], 1)) * 100 }%"></div>
-                </div>
-                <div class="dist-value">{stats['active']}</div>
-            </div>
-            <div class="dist-bar">
-                <div class="dist-label">Paused</div>
-                <div class="dist-track">
-                    <div class="dist-fill paused" style="width: { (stats['paused'] / max(stats['total'], 1)) * 100 }%"></div>
-                </div>
-                <div class="dist-value">{stats['paused']}</div>
-            </div>
-            <div class="dist-bar">
-                <div class="dist-label">Completed</div>
-                <div class="dist-track">
-                    <div class="dist-fill completed" style="width: { (stats['completed'] / max(stats['total'], 1)) * 100 }%"></div>
-                </div>
-                <div class="dist-value">{stats['completed']}</div>
-            </div>
-            <div class="dist-bar">
-                <div class="dist-label">Failed</div>
-                <div class="dist-track">
-                    <div class="dist-fill failed" style="width: { (stats['failed'] / max(stats['total'], 1)) * 100 }%"></div>
-                </div>
-                <div class="dist-value">{stats['failed']}</div>
-            </div>
-        </div>
-    </section>
-
-    <section class="section info-section">
-        <h2><span class="section-icon">ℹ️</span>Orchestrator Info</h2>
-        <div class="info-grid">
-            <div class="info-item">
-                <span class="info-label">Storage Path</span>
-                <span class="info-value">/home/agentzero/agents/orchestrator/tasks</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Data Mode</span>
-                <span class="info-value">Read-only Visualization</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Connection</span>
-                <span class="info-value {connection_class}">{ "Live" if orchestrator_available else "Fallback Mode" }</span>
-            </div>
-        </div>
-    </section>
-
-    <section class="section">
-        <h2><span class="section-icon">🩺</span>AgentOS Health Check</h2>
-        <button class="health-check-button" type="button" onclick="runHealthCheckDashboardV2Task()">Run AgentOS Health Check</button>
-    </section>
-
-    <div class="doc-modal-overlay" id="doc-modal-overlay" aria-hidden="true">
-        <div class="doc-modal" role="dialog" aria-modal="true" aria-labelledby="doc-modal-title">
-            <div class="doc-modal-header">
-                <div>
-                    <h3 id="doc-modal-title" class="doc-modal-title">Document</h3>
-                    <p id="doc-modal-meta" class="doc-modal-meta">Ready</p>
-                </div>
-                <div class="doc-modal-actions">
-                    <button class="button secondary" type="button" id="doc-modal-copy-btn">Copy</button>
-                    <button class="button secondary" type="button" id="doc-modal-close-btn" aria-label="Close">X</button>
-                </div>
-            </div>
-            <pre id="doc-modal-content" class="doc-modal-content"></pre>
-        </div>
     </div>
     '''
 
     extra_css = '''
-        .super-header {
+        .mc-shell {
+            width: 100%;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+        }
+        .mc-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 24px;
+            gap: 14px;
+            padding: 16px 18px;
+            border: 1px solid rgba(0, 242, 255, 0.2);
+            border-radius: 4px;
+            background: #0d1c2d;
         }
-        .health-check-button {
-            border: 1px solid var(--ao-border);
-            background: var(--ao-panel);
-            color: var(--ao-text);
-            border-radius: 8px;
-            padding: 8px 12px;
-            font-size: 12px;
-            font-weight: 600;
-            cursor: pointer;
-        }
-        .health-check-button:hover {
-            border-color: var(--ao-cyan);
-        }
-        .health-check-logs {
-            margin: 0;
-            padding: 12px;
-            background: var(--ao-panel);
-            border: 1px solid var(--ao-border);
-            border-radius: 8px;
-            color: var(--ao-text);
-            font-size: 11px;
-            line-height: 1.4;
-            white-space: pre-wrap;
-            overflow-x: auto;
-        }
-        .super-title h1 {
-            font-size: 26px;
+        .mc-title h1 {
+            margin: 0 0 4px;
+            font-size: 24px;
             font-weight: 700;
+            letter-spacing: 0.04em;
+            color: #00f2ff;
+        }
+        .mc-subtitle {
+            margin: 0;
+            font-size: 12px;
+            font-weight: 500;
+            letter-spacing: 0.04em;
+            color: #8eeeff;
+        }
+        .mc-connection {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+            border: 1px solid rgba(0, 242, 255, 0.25);
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+        }
+        .mc-connection.online { color: #00ff9f; border-color: rgba(0, 255, 159, 0.35); background: rgba(0, 255, 159, 0.08); }
+        .mc-connection.offline { color: #ff5f7a; border-color: rgba(255, 95, 122, 0.35); background: rgba(255, 95, 122, 0.08); }
+        .connection-dot { width: 8px; height: 8px; border-radius: 999px; background: currentColor; }
+
+        .mc-status-grid {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 10px;
+            min-width: 0;
+        }
+        .mc-status-card {
+            border: 1px solid rgba(0, 242, 255, 0.2);
+            border-radius: 4px;
+            background: #122131;
+            padding: 11px 12px;
+            min-width: 0;
+        }
+        .mc-status-label {
+            display: block;
+            font-size: 10px;
+            letter-spacing: 0.08em;
+            color: #8fa3be;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+        }
+        .mc-status-card strong {
+            font-size: 18px;
+            color: #e9f5ff;
+        }
+        .mc-status-card strong.online, .mc-status-card strong.success { color: #00ff9f; }
+        .mc-status-card strong.warning { color: #ffc857; }
+        .mc-status-card strong.danger, .mc-status-card strong.offline { color: #ff5f7a; }
+
+        .mc-dashboard-grid {
+            width: 100%;
+            min-width: 0;
+            display: grid;
+            grid-template-columns: repeat(12, minmax(0, 1fr));
+            gap: 16px;
+            align-items: start;
+        }
+        .mc-dashboard-grid > * { min-width: 0; }
+        .mc-col-left { grid-column: span 3; }
+        .mc-col-center { grid-column: span 6; }
+        .mc-col-right { grid-column: span 3; }
+        .mc-panel {
+            border: 1px solid rgba(0, 242, 255, 0.2);
+            border-radius: 4px;
+            background: #122131;
+            min-width: 0;
+            overflow: hidden;
+        }
+        .mc-panel-header {
+            border-bottom: 1px solid rgba(0, 242, 255, 0.2);
+            padding: 10px 12px;
+        }
+        .mc-panel-header h2 {
+            margin: 0;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #95f7ff;
+        }
+        .mc-panel-body {
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-width: 0;
+        }
+        .mc-subpanel {
+            border: 1px solid rgba(0, 242, 255, 0.16);
+            border-radius: 4px;
+            background: rgba(6, 16, 28, 0.66);
+            padding: 10px;
+            min-width: 0;
+        }
+        .mc-subpanel h3 {
+            margin: 0 0 8px;
+            font-size: 11px;
+            font-weight: 700;
+            color: #90a7c3;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+        .task-list, .approval-list, .timeline-list, .blocked-list, .audit-list, .execution-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            min-width: 0;
+        }
+        .task-item, .approval-item, .timeline-item, .blocked-item, .audit-item, .execution-item {
+            display: grid;
+            gap: 10px;
+            align-items: center;
+            border: 1px solid rgba(0, 242, 255, 0.18);
+            border-radius: 4px;
+            background: rgba(6, 16, 28, 0.75);
+            padding: 8px 9px;
+            min-width: 0;
+            font-size: 11px;
+        }
+        .task-item { grid-template-columns: 72px minmax(0, 1fr) auto auto; }
+        .approval-item { grid-template-columns: 72px minmax(0, 1fr) auto; }
+        .timeline-item { grid-template-columns: 72px minmax(0, 1fr) auto auto; }
+        .blocked-item { grid-template-columns: 72px minmax(0, 1fr) minmax(0, 1.4fr) auto; }
+        .audit-item, .execution-item { grid-template-columns: auto minmax(0, 1fr) auto; }
+        .task-id, .approval-task, .timeline-task, .blocked-task { font-family: ui-monospace, monospace; color: #84a5bf; }
+        .task-name, .approval-step, .timeline-step, .blocked-step, .audit-command, .exec-command {
+            min-width: 0;
+            color: #dcecff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .blocked-error {
+            min-width: 0;
+            color: #b8d0e7;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .timeline-duration, .task-steps {
+            color: #9ab7d3;
+            font-family: ui-monospace, monospace;
+            font-size: 10px;
+            white-space: nowrap;
+        }
+        .task-approval {
+            color: #ffc857;
+            font-size: 12px;
+            line-height: 1;
+        }
+        .task-status, .approval-risk, .timeline-event, .blocked-risk, .audit-status, .exec-status {
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            text-transform: uppercase;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .task-status.active, .timeline-event.executing, .exec-status.executed { color: #00ff9f; background: rgba(0, 255, 159, 0.12); }
+        .task-status.paused, .approval-risk.medium, .blocked-risk.medium, .audit-status.dry_run { color: #ffc857; background: rgba(255, 200, 87, 0.12); }
+        .task-status.completed, .timeline-event.validated { color: #00f2ff; background: rgba(0, 242, 255, 0.12); }
+        .approval-risk.high, .blocked-risk.high, .timeline-event.failed, .audit-status.blocked, .exec-status.blocked { color: #ff5f7a; background: rgba(255, 95, 122, 0.12); }
+        .empty-state {
+            border: 1px dashed rgba(0, 242, 255, 0.18);
+            border-radius: 4px;
+            padding: 10px;
+            text-align: center;
+            color: #8fa3be;
+            font-size: 11px;
+        }
+
+        .workflow-steps {
+            display: grid;
+            grid-template-columns: repeat(8, minmax(0, 1fr));
+            gap: 7px;
+            min-width: 0;
+        }
+        .workflow-step {
+            border: 1px solid rgba(0, 242, 255, 0.2);
+            border-radius: 4px;
+            background: rgba(6, 16, 28, 0.74);
+            color: #c8e9ff;
+            font-size: 10px;
+            font-weight: 600;
+            padding: 7px 4px;
+            text-align: center;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .mc-meta-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            min-width: 0;
+        }
+        .focus-card {
+            border: 1px solid rgba(0, 242, 255, 0.2);
+            border-radius: 4px;
+            background: rgba(7, 18, 31, 0.8);
+            padding: 10px 11px;
+            min-width: 0;
+        }
+        .focus-card h3 { margin: 0 0 7px; font-size: 12px; color: #b7edff; letter-spacing: 0.03em; }
+        .focus-card p { margin: 0 0 7px; font-size: 11px; line-height: 1.5; color: #a8bdd7; overflow-wrap: anywhere; }
+        .focus-card .focus-meta { color: #8ca5c1; margin: 0; }
+
+        .operation-focus-panel {
+            border: 1px solid rgba(0, 242, 255, 0.2);
+            border-radius: 4px;
+            background:
+                linear-gradient(135deg, rgba(0, 242, 255, 0.08), transparent 42%),
+                rgba(7, 18, 31, 0.88);
+            padding: 14px;
+            min-width: 0;
+            display: grid;
+            gap: 14px;
+        }
+        .operation-focus-head {
+            display: flex;
+            gap: 10px;
+            align-items: flex-start;
+        }
+        .operation-live-dot {
+            width: 10px;
+            height: 10px;
+            margin-top: 4px;
+            border-radius: 999px;
+            background: #00ff9f;
+            box-shadow: 0 0 16px rgba(0, 255, 159, 0.45);
+            animation: operationPulse 2.2s ease-in-out infinite;
+        }
+        @keyframes operationPulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.55; transform: scale(0.82); }
+        }
+        .operation-focus-head h3 {
+            margin: 0 0 5px;
+            font-size: 16px;
+            color: #dff8ff;
+            letter-spacing: 0.04em;
+        }
+        .operation-focus-head p {
+            margin: 0;
+            color: #94aac4;
+            font-size: 12px;
+            line-height: 1.45;
+        }
+        .operation-focus-main {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+            gap: 14px;
+            align-items: end;
+            min-width: 0;
+        }
+        .operation-label {
+            display: block;
+            color: #7f99b2;
+            font-family: ui-monospace, monospace;
+            font-size: 10px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
             margin-bottom: 4px;
         }
-        .super-title p {
-            color: var(--ao-muted);
-            font-size: 14px;
+        .operation-resource {
+            display: block;
+            color: #00f2ff;
+            font-size: 24px;
+            line-height: 1.15;
+            overflow-wrap: anywhere;
         }
-        .workflow-section {
-            margin-bottom: 20px;
+        .operation-focus-main p {
+            margin: 7px 0 0;
+            color: #b1c7de;
+            font-size: 12px;
+            line-height: 1.45;
         }
-        .workflow-steps {
+        .operation-progress {
+            display: grid;
+            gap: 7px;
+        }
+        .operation-progress span {
+            color: #dff4ff;
+            font-size: 12px;
+            font-weight: 800;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+        .operation-progress small {
+            color: #8fa8c4;
+            font-family: ui-monospace, monospace;
+            font-size: 10px;
+        }
+        .operation-track {
+            height: 8px;
+            border-radius: 4px;
+            background: rgba(0, 242, 255, 0.12);
+            overflow: hidden;
+        }
+        .operation-fill {
+            height: 100%;
+            border-radius: 4px;
+            background: linear-gradient(90deg, #00f2ff, #00ff9f);
+            box-shadow: 0 0 14px rgba(0, 242, 255, 0.35);
+        }
+        .operation-focus-grid {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 8px;
         }
-        .workflow-step {
-            border: 1px solid var(--ao-border);
-            border-radius: 8px;
-            background: var(--ao-panel);
-            color: var(--ao-text);
-            font-size: 12px;
-            font-weight: 600;
-            padding: 8px 10px;
-            text-align: center;
-        }
-        .fivem-focus-grid {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 12px;
-            margin-bottom: 20px;
-        }
-        .focus-card {
-            border: 1px solid var(--ao-border);
-            border-radius: 10px;
-            background: var(--ao-panel);
-            padding: 14px;
-        }
-        .focus-card h3 {
-            font-size: 15px;
-            margin-bottom: 8px;
-            color: var(--ao-text);
-        }
-        .focus-card p {
-            font-size: 12px;
-            color: var(--ao-muted);
-            margin-bottom: 8px;
-            word-break: break-word;
-        }
-        .focus-card .focus-meta {
-            color: var(--ao-soft);
-            font-size: 11px;
-            margin-bottom: 0;
-        }
-        .connection-indicator {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 8px 14px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
-        }
-        .connection-indicator.online {
-            background: rgba(55, 214, 122, 0.15);
-            border: 1px solid rgba(55, 214, 122, 0.3);
-            color: var(--ao-green);
-        }
-        .connection-indicator.offline {
-            background: rgba(255, 99, 112, 0.15);
-            border: 1px solid rgba(255, 99, 112, 0.3);
-            color: var(--ao-danger);
-        }
-        .connection-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: currentColor;
-        }
-        .status-grid {
-            display: grid;
-            grid-template-columns: repeat(5, 1fr);
-            gap: 12px;
-            margin-bottom: 24px;
-        }
-        .status-card {
-            padding: 16px;
-            border: 1px solid var(--ao-border);
-            border-radius: 10px;
-            background: var(--ao-panel);
-        }
-        .status-label {
-            font-size: 11px;
-            font-weight: 800;
-            letter-spacing: 0.06em;
-            text-transform: uppercase;
-            color: var(--ao-soft);
-            margin-bottom: 8px;
-        }
-        .status-value {
-            font-size: 24px;
-            font-weight: 700;
-            color: var(--ao-text);
-        }
-        .status-value.online, .status-value.success { color: var(--ao-green); }
-        .status-value.warning { color: #fbbf24; }
-        .status-value.danger { color: var(--ao-danger); }
-        .dashboard-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 20px;
-            margin-bottom: 24px;
-        }
-        .section h2 {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 16px;
-            margin-bottom: 14px;
-            color: var(--ao-text);
-        }
-        .section-icon { font-size: 16px; }
-        .task-list, .approval-list {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        .task-item, .approval-item {
-            display: grid;
-            grid-template-columns: 70px 1fr auto auto;
-            gap: 10px;
-            align-items: center;
-            padding: 10px 12px;
-            border: 1px solid var(--ao-border);
-            border-radius: 8px;
-            background: var(--ao-panel);
-            font-size: 12px;
-        }
-        .task-id, .approval-task {
-            font-family: monospace;
-            color: var(--ao-soft);
-        }
-        .task-name, .approval-step {
-            color: var(--ao-text);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .task-status {
-            padding: 3px 8px;
+        .operation-focus-grid div {
+            border: 1px solid rgba(0, 242, 255, 0.15);
             border-radius: 4px;
-            font-size: 10px;
-            font-weight: 700;
-            text-transform: uppercase;
+            background: rgba(1, 15, 31, 0.72);
+            padding: 8px;
+            min-width: 0;
         }
-        .task-status.active { background: rgba(55, 214, 122, 0.15); color: var(--ao-green); }
-        .task-status.paused { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
-        .task-status.completed { background: rgba(0, 212, 255, 0.15); color: var(--ao-cyan); }
-        .task-steps, .task-approval {
-            font-size: 10px;
-            color: var(--ao-soft);
-        }
-        .approval-risk {
-            padding: 3px 8px;
-            border-radius: 4px;
-            font-size: 10px;
-            font-weight: 700;
-            text-transform: uppercase;
-        }
-        .approval-risk.high { background: rgba(255, 99, 112, 0.15); color: var(--ao-danger); }
-        .approval-risk.medium { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
-        .approval-risk.unknown { background: rgba(125, 211, 252, 0.15); color: var(--ao-blue); }
-        .empty-state {
-            padding: 20px;
-            text-align: center;
-            color: var(--ao-soft);
-            font-size: 12px;
-            border: 1px dashed var(--ao-border);
-            border-radius: 8px;
-        }
-        .distribution-bars {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-        .dist-bar {
-            display: grid;
-            grid-template-columns: 80px 1fr 40px;
-            gap: 10px;
-            align-items: center;
-        }
-        .dist-label {
-            font-size: 12px;
-            color: var(--ao-muted);
-        }
-        .dist-track {
-            height: 8px;
-            background: var(--ao-border);
-            border-radius: 4px;
-            overflow: hidden;
-        }
-        .dist-fill {
-            height: 100%;
-            border-radius: 4px;
-            transition: width 0.3s ease;
-        }
-        .dist-fill.active { background: var(--ao-green); }
-        .dist-fill.paused { background: #fbbf24; }
-        .dist-fill.completed { background: var(--ao-cyan); }
-        .dist-fill.failed { background: var(--ao-danger); }
-        .dist-value {
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--ao-text);
-            text-align: right;
-        }
-        .info-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 16px;
-        }
-        .info-item {
-            padding: 12px;
-            border: 1px solid var(--ao-border);
-            border-radius: 8px;
-            background: var(--ao-panel);
-        }
-        .info-label {
+        .operation-focus-grid span {
             display: block;
+            color: #7f99b2;
             font-size: 10px;
-            font-weight: 800;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
-            color: var(--ao-soft);
             margin-bottom: 4px;
         }
-        .info-value {
-            font-size: 13px;
-            color: var(--ao-text);
+        .operation-focus-grid strong {
+            color: #e6f5ff;
+            font-size: 12px;
+            overflow-wrap: anywhere;
         }
-        .info-value.online { color: var(--ao-green); }
-        .info-value.offline { color: var(--ao-danger); }
-
-        .timelines-section, .blocked-section, .audit-section, .execution-section, .risk-section {
-            margin-bottom: 20px;
-        }
-        .timeline-list, .blocked-list, .audit-list, .execution-list, .risk-bars {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        .timeline-item, .blocked-item, .audit-item, .execution-item {
+        .operation-focus-grid .risk-low { color: #00ff9f; }
+        .operation-focus-grid .risk-medium { color: #ffc857; }
+        .operation-focus-grid .risk-high { color: #ff5f7a; }
+        .operation-log-stream {
             display: grid;
-            grid-template-columns: 70px 1fr auto auto;
-            gap: 10px;
-            align-items: center;
-            padding: 8px 12px;
-            border: 1px solid var(--ao-border);
-            border-radius: 6px;
-            background: var(--ao-panel);
-            font-size: 11px;
-        }
-        .timeline-task, .blocked-task, .audit-status, .exec-status {
-            font-family: monospace;
-            color: var(--ao-soft);
-        }
-        .timeline-step, .blocked-step, .audit-command, .exec-command {
-            color: var(--ao-text);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .timeline-event, .blocked-risk, .exec-risk {
-            padding: 2px 6px;
+            gap: 6px;
+            border: 1px solid rgba(0, 242, 255, 0.14);
             border-radius: 4px;
-            font-size: 9px;
-            font-weight: 600;
-            text-transform: uppercase;
+            background: rgba(1, 15, 31, 0.82);
+            padding: 10px;
+            max-height: 128px;
+            overflow: auto;
+            color: #9eb9d4;
+            font-family: ui-monospace, monospace;
+            font-size: 11px;
+            line-height: 1.4;
         }
-        .timeline-event.executing { background: rgba(55, 214, 122, 0.15); color: var(--ao-green); }
-        .timeline-event.validated { background: rgba(0, 212, 255, 0.15); color: var(--ao-cyan); }
-        .timeline-event.completed { background: rgba(55, 214, 122, 0.15); color: var(--ao-green); }
-        .timeline-event.failed { background: rgba(255, 99, 112, 0.15); color: var(--ao-danger); }
-        .timeline-duration, .blocked-error, .audit-risk {
-            color: var(--ao-soft);
-            font-size: 10px;
-        }
-        .blocked-risk.safe { background: rgba(55, 214, 122, 0.15); color: var(--ao-green); }
-        .blocked-risk.low { background: rgba(110, 203, 255, 0.15); color: var(--ao-blue); }
-        .blocked-risk.medium { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
-        .blocked-risk.high { background: rgba(255, 99, 112, 0.15); color: var(--ao-danger); }
-        .blocked-risk.critical { background: rgba(255, 99, 112, 0.25); color: var(--ao-danger); }
-        .audit-status.blocked { background: rgba(255, 99, 112, 0.15); color: var(--ao-danger); }
-        .audit-status.executed { background: rgba(55, 214, 122, 0.15); color: var(--ao-green); }
-        .audit-status.dry_run { background: rgba(0, 212, 255, 0.15); color: var(--ao-cyan); }
-        .exec-status.blocked { background: rgba(255, 99, 112, 0.15); color: var(--ao-danger); }
-        .exec-status.executed { background: rgba(55, 214, 122, 0.15); color: var(--ao-green); }
-        .exec-status.dry_run { background: rgba(0, 212, 255, 0.15); color: var(--ao-cyan); }
 
-        .risk-bars {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
+        .mc-guard-strip {
+            border: 1px solid rgba(0, 242, 255, 0.2);
+            border-radius: 4px;
+            background: #0d1c2d;
+            padding: 14px;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 14px;
+            align-items: start;
+            min-width: 0;
         }
+        .mc-guard-strip h3 {
+            margin: 0;
+            font-size: 12px;
+            color: #9cf8ff;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+        .mc-guard-strip p {
+            margin: 5px 0 10px;
+            color: #9cb2cc;
+            font-size: 11px;
+            line-height: 1.45;
+        }
+        .risk-bars { display: flex; flex-direction: column; gap: 5px; }
         .risk-bar {
             display: grid;
-            grid-template-columns: 70px 1fr 40px;
-            gap: 10px;
+            grid-template-columns: 44px minmax(0, 1fr) 26px;
+            gap: 8px;
             align-items: center;
-        }
-        .risk-label {
-            font-size: 11px;
-            color: var(--ao-muted);
+            font-size: 10px;
+            color: #b9d6ef;
         }
         .risk-track {
             height: 6px;
-            background: var(--ao-border);
-            border-radius: 3px;
+            border-radius: 4px;
+            background: rgba(0, 242, 255, 0.1);
             overflow: hidden;
         }
-        .risk-fill {
-            height: 100%;
-            border-radius: 3px;
-            transition: width 0.3s ease;
-        }
-        .risk-fill.safe { background: var(--ao-green); }
-        .risk-fill.low { background: var(--ao-blue); }
-        .risk-fill.medium { background: #fbbf24; }
-        .risk-fill.high { background: #f97316; }
-        .risk-fill.critical { background: var(--ao-danger); }
-        .risk-value {
-            font-size: 11px;
-            font-weight: 600;
-            color: var(--ao-text);
-            text-align: right;
-        }
-
-        .incoming-queue-section {
-            margin-top: 20px;
-        }
-        .incoming-queue-list {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            max-height: 500px;
-            overflow-y: auto;
-            padding: 4px;
-        }
-        .incoming-resource-item {
-            border: 1px solid var(--ao-border);
-            border-radius: 8px;
-            padding: 12px;
-            background: rgba(2, 6, 23, 0.4);
-        }
-        .resource-header {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 8px;
-        }
-        .resource-name {
-            font-weight: 600;
-            color: var(--ao-text);
-            font-size: 14px;
-        }
-        .resource-manifest {
-            font-size: 11px;
-            color: var(--ao-soft);
-            padding: 2px 6px;
-            background: rgba(125, 211, 252, 0.1);
+        .risk-fill { height: 100%; border-radius: 4px; }
+        .risk-fill.safe { background: #00ff9f; }
+        .risk-fill.low { background: #00f2ff; }
+        .risk-fill.medium { background: #ffc857; }
+        .risk-fill.high { background: #ff9f43; }
+        .risk-fill.critical { background: #ff5f7a; }
+        .health-check-button {
+            border: 1px solid rgba(0, 242, 255, 0.32);
+            background: rgba(0, 242, 255, 0.08);
+            color: #c8f8ff;
             border-radius: 4px;
-        }
-        .resource-status {
+            padding: 9px 11px;
             font-size: 11px;
-            padding: 2px 8px;
-            border-radius: 4px;
-            margin-left: auto;
-        }
-        .resource-status.analyzed {
-            background: rgba(55, 214, 122, 0.15);
-            color: var(--ao-green);
-        }
-        .resource-status.not-analyzed {
-            background: rgba(251, 191, 36, 0.15);
-            color: #fbbf24;
-        }
-        .resource-badges {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-            margin-bottom: 10px;
-        }
-        .staging-badge {
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 10px;
             font-weight: 700;
-            border: 1px solid transparent;
+            cursor: pointer;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
         }
-        .staging-badge.staged { background: rgba(96, 165, 250, 0.16); color: #93c5fd; border-color: rgba(96, 165, 250, 0.26); }
-        .staging-badge.ready { background: rgba(16, 185, 129, 0.16); color: #6ee7b7; border-color: rgba(16, 185, 129, 0.26); }
-        .staging-badge.modified { background: rgba(251, 191, 36, 0.16); color: #fcd34d; border-color: rgba(251, 191, 36, 0.3); }
-        .staging-badge.approved { background: rgba(34, 197, 94, 0.2); color: #86efac; border-color: rgba(34, 197, 94, 0.3); }
-        .staging-badge.rejected { background: rgba(248, 113, 113, 0.16); color: #fca5a5; border-color: rgba(248, 113, 113, 0.32); }
-        .analysis-badge {
-            padding: 2px 8px;
+        .health-check-button:hover { background: rgba(0, 242, 255, 0.16); }
+        .health-check-logs {
+            margin: 0;
+            border: 1px solid rgba(0, 242, 255, 0.14);
             border-radius: 4px;
-            font-size: 10px;
-            font-weight: 700;
-            background: rgba(0, 212, 255, 0.12);
-            color: var(--ao-cyan);
-            border: 1px solid rgba(0, 212, 255, 0.2);
-        }
-        .analysis-badge.framework { background: rgba(167, 139, 250, 0.12); color: #a78bfa; border-color: rgba(167, 139, 250, 0.2); }
-        .analysis-badge.inventory { background: rgba(52, 211, 153, 0.12); color: #34d399; border-color: rgba(52, 211, 153, 0.2); }
-        .analysis-badge.target { background: rgba(251, 191, 36, 0.12); color: #fbbf24; border-color: rgba(251, 191, 36, 0.2); }
-        .analysis-badge.database { background: rgba(96, 165, 250, 0.12); color: #60a5fa; border-color: rgba(96, 165, 250, 0.2); }
-        .analysis-badge.risk { background: rgba(255, 99, 112, 0.12); border-color: rgba(255, 99, 112, 0.2); }
-        .resource-actions {
-            display: flex;
-            gap: 8px;
-        }
-        .analyze-btn {
-            font-size: 12px;
-            padding: 6px 12px;
-            background: rgba(0, 212, 255, 0.15);
-            border: 1px solid rgba(0, 212, 255, 0.3);
-        }
-        .incoming-queue-loading, .incoming-queue-error, .incoming-queue-empty {
-            padding: 20px;
-            text-align: center;
-            color: var(--ao-muted);
-        }
-        .incoming-queue-error { color: var(--ao-danger); }
-        .doc-modal-overlay {
-            position: fixed;
-            inset: 0;
-            background: rgba(2, 6, 23, 0.82);
-            display: none;
-            align-items: center;
-            justify-content: center;
-            z-index: 2000;
-            padding: 20px;
-        }
-        .doc-modal-overlay.open {
-            display: flex;
-        }
-        .doc-modal {
-            width: min(1040px, 96vw);
-            max-height: 90vh;
-            background: #090f1d;
-            border: 1px solid var(--ao-border);
-            border-radius: 10px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
-            display: flex;
-            flex-direction: column;
-        }
-        .doc-modal-header {
-            display: flex;
-            align-items: flex-start;
-            justify-content: space-between;
-            padding: 12px 14px;
-            border-bottom: 1px solid var(--ao-border);
-            gap: 12px;
-        }
-        .doc-modal-title {
-            margin: 0;
-            font-size: 15px;
-            color: var(--ao-text);
-        }
-        .doc-modal-meta {
-            margin: 4px 0 0;
-            font-size: 11px;
-            color: var(--ao-soft);
-        }
-        .doc-modal-actions {
-            display: flex;
-            gap: 8px;
-        }
-        .doc-modal-content {
-            margin: 0;
-            padding: 14px;
+            background: rgba(2, 9, 17, 0.9);
+            color: #b8d7ef;
+            padding: 8px;
+            max-height: 170px;
             overflow: auto;
-            max-height: 72vh;
             white-space: pre-wrap;
-            word-break: break-word;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-            font-size: 12px;
-            line-height: 1.45;
-            color: #e7edf8;
-            background: transparent;
+            font-size: 11px;
+            line-height: 1.4;
         }
 
-        @media (max-width: 768px) {
-            .status-grid { grid-template-columns: repeat(2, 1fr); }
-            .dashboard-grid { grid-template-columns: 1fr; }
-            .task-item { grid-template-columns: 60px 1fr auto; }
-            .info-grid { grid-template-columns: 1fr; }
-            .workflow-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-            .fivem-focus-grid { grid-template-columns: 1fr; }
+        @media (max-width: 1500px) {
+            .mc-col-left { grid-column: span 4; }
+            .mc-col-center { grid-column: span 5; }
+            .mc-col-right { grid-column: span 3; }
+            .workflow-steps { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+        }
+        @media (max-width: 1200px) {
+            .mc-dashboard-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+            .mc-col-left { grid-column: span 3; }
+            .mc-col-center { grid-column: span 3; }
+            .mc-col-right { grid-column: span 6; }
+            .blocked-item { grid-template-columns: 72px minmax(0, 1fr) auto; }
+            .blocked-error { display: none; }
+        }
+        @media (max-width: 900px) {
+            .mc-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .mc-dashboard-grid { grid-template-columns: 1fr; }
+            .mc-col-left, .mc-col-center, .mc-col-right { grid-column: span 1; }
+            .mc-meta-grid { grid-template-columns: 1fr; }
+            .mc-guard-strip { grid-template-columns: 1fr; }
         }
     '''
 
@@ -3845,530 +4478,27 @@ def super_dashboard() -> str:
             }
             window.location.reload();
         }
-
-        const incomingResourcesData = ''' + incoming_resources_json + ''';
-        const ANALYSIS_ACTION_LABELS = {
-            "safe": "Ready for staging",
-            "manual-sql": "SQL needs review",
-            "review-required": "Risk - review needed",
-            "adaptation-needed": "Adaptation needed",
-        };
-
-        function escapeHtml(value) {
-            return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-        }
-
-        function getDocModalNodes() {
-            return {
-                overlay: document.getElementById("doc-modal-overlay"),
-                title: document.getElementById("doc-modal-title"),
-                meta: document.getElementById("doc-modal-meta"),
-                content: document.getElementById("doc-modal-content"),
-                copyBtn: document.getElementById("doc-modal-copy-btn"),
-                closeBtn: document.getElementById("doc-modal-close-btn"),
-            };
-        }
-
-        function closeDocumentModal() {
-            const nodes = getDocModalNodes();
-            if (!nodes.overlay) return;
-            nodes.overlay.classList.remove("open");
-            nodes.overlay.setAttribute("aria-hidden", "true");
-        }
-
-        function openDocumentModal(title, meta, contentText) {
-            const nodes = getDocModalNodes();
-            if (!nodes.overlay || !nodes.title || !nodes.meta || !nodes.content || !nodes.copyBtn) return;
-            nodes.title.textContent = title || "Document";
-            nodes.meta.textContent = meta || "";
-            nodes.content.textContent = contentText || "";
-            nodes.overlay.classList.add("open");
-            nodes.overlay.setAttribute("aria-hidden", "false");
-            nodes.copyBtn.onclick = () => {
-                const text = nodes.content.textContent || "";
-                navigator.clipboard.writeText(text).then(() => {
-                    alert("Copied.");
-                }).catch(() => {
-                    alert("Copy failed.");
-                });
-            };
-            nodes.content.scrollTop = 0;
-        }
-
-        function wireDocumentModalBehavior() {
-            const nodes = getDocModalNodes();
-            if (!nodes.overlay || !nodes.closeBtn) return;
-            nodes.closeBtn.addEventListener("click", closeDocumentModal);
-            nodes.overlay.addEventListener("click", (event) => {
-                if (event.target === nodes.overlay) {
-                    closeDocumentModal();
-                }
-            });
-            document.addEventListener("keydown", (event) => {
-                if (event.key === "Escape" && nodes.overlay.classList.contains("open")) {
-                    closeDocumentModal();
-                }
-            });
-        }
-
-        async function openPatchPlanModal(scriptName) {
-            const response = await fetch("/api/analysis/" + encodeURIComponent(scriptName) + "/patch-plan/md", { method: "GET" });
-            const body = await response.json();
-            if (!response.ok) throw new Error(body.detail || body.error || "Patch plan not found");
-            const markdown = body.content || "No patch plan content.";
-            openDocumentModal("Patch Plan", "Resource: " + scriptName, markdown);
-        }
-
-        async function openPromptModal(promptType) {
-            const endpoint = promptType === "opencode" ? "/api/prompts/opencode-next" : "/api/prompts/codex-audit-next";
-            const title = promptType === "opencode" ? "OpenCode Prompt" : "Codex Audit Prompt";
-            const response = await fetch(endpoint, { method: "GET" });
-            const body = await response.json();
-            if (!response.ok) throw new Error(body.detail || body.error || "Prompt not available");
-            const content = body.content || "";
-            const generatedAt = body.generated_at || "unknown";
-            openDocumentModal(title, "Generated: " + generatedAt, content);
-        }
-
-        function stagingDiffText(diff) {
-            const lines = [];
-            const safeDiff = diff || {};
-            const summary = safeDiff.summary || {};
-            lines.push("Resource: " + String(safeDiff.resource || "unknown"));
-            lines.push("Status: " + String(safeDiff.status || "UNKNOWN"));
-            lines.push("");
-            lines.push("Changed files (" + String(summary.changed || 0) + "):");
-            for (const p of (safeDiff.changed_files || [])) lines.push("  - " + p);
-            if (!(safeDiff.changed_files || []).length) lines.push("  - none");
-            lines.push("");
-            lines.push("Added files (" + String(summary.added || 0) + "):");
-            for (const p of (safeDiff.added_files || [])) lines.push("  - " + p);
-            if (!(safeDiff.added_files || []).length) lines.push("  - none");
-            lines.push("");
-            lines.push("Deleted files (" + String(summary.deleted || 0) + "):");
-            for (const p of (safeDiff.deleted_files || [])) lines.push("  - " + p);
-            if (!(safeDiff.deleted_files || []).length) lines.push("  - none");
-            return lines.join("\\n");
-        }
-
-        async function refreshResourceCard(scriptName) {
-            try {
-                const response = await fetch("/api/incoming", { method: "GET" });
-                const body = await response.json();
-                if (!response.ok) return;
-                const incoming = body.incoming || [];
-                const match = incoming.find((item) => item && item.name === scriptName);
-                if (!match) return;
-                const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
-                if (resource) {
-                    resource.staging = {
-                        exists: !!(match.staging_exists),
-                        status: String(match.staging_status || "NONE"),
-                        approved_at: match.staging_approved_at || null,
-                    };
-                }
-            } catch (_) {
-                // No-op refresh fallback: current page state remains usable.
-            }
-        }
-
-        function getRiskColor(risk) {
-            if (risk === "high") return "var(--ao-danger)";
-            if (risk === "medium") return "#fbbf24";
-            return "var(--ao-green)";
-        }
-
-        function getActionLabel(recommendedAction) {
-            return ANALYSIS_ACTION_LABELS[recommendedAction] || recommendedAction || "Ready";
-        }
-
-        function riskFromFindings(findings) {
-            let risk = "low";
-            for (const finding of (findings || [])) {
-                if (finding && finding.severity === "high") {
-                    risk = "high";
-                    break;
-                }
-                if (finding && finding.severity === "medium" && risk !== "high") {
-                    risk = "medium";
-                }
-            }
-            return risk;
-        }
-
-        function summaryBadgesHtml(summary) {
-            const safeSummary = summary || {};
-            const framework = safeSummary.framework || "standalone";
-            const inventory = safeSummary.inventory || "none";
-            const target = safeSummary.target || "none";
-            const database = safeSummary.database || "none";
-            const risk = safeSummary.risk || "low";
-
-            return `
-                <span class="analysis-badge framework">${escapeHtml(framework)}</span>
-                <span class="analysis-badge inventory">${escapeHtml(inventory)}</span>
-                <span class="analysis-badge target">${escapeHtml(target)}</span>
-                <span class="analysis-badge database">${escapeHtml(database)}</span>
-                <span class="analysis-badge risk" style="color:${getRiskColor(risk)}">Risk: ${escapeHtml(risk)}</span>
-            `;
-        }
-
-        function normalizedStageStatus(resource) {
-            const raw = String((resource && resource.staging && resource.staging.status) || "NONE").toUpperCase();
-            if (["STAGED", "READY", "MODIFIED", "APPROVED", "REJECTED"].includes(raw)) return raw;
-            return "NONE";
-        }
-
-        function stageBadgeHtml(resource) {
-            const status = normalizedStageStatus(resource);
-            if (status === "NONE") return "";
-            const cls = status.toLowerCase();
-            return `<span class="staging-badge ${cls}">${escapeHtml(status)}</span>`;
-        }
-
-        function postStageButtonsHtml(name) {
-            return `
-                <button class="button secondary view-staging-diff-btn" data-script="${escapeHtml(name)}">View Staging Diff</button>
-                <button class="button secondary approve-staging-btn" data-script="${escapeHtml(name)}">Approve For Apply</button>
-                <button class="button secondary delete-staging-btn" data-script="${escapeHtml(name)}">Delete Staging Copy</button>
-            `;
-        }
-
-        function summaryFromAnalysis(analysis) {
-            const markers = (analysis && analysis.markers) || {};
-            return {
-                framework: Object.keys(markers.framework || {}).join(", ") || "standalone",
-                inventory: Object.keys(markers.inventory || {}).join(", ") || "none",
-                target: Object.keys(markers.target || {}).join(", ") || "none",
-                database: Object.keys(markers.database || {}).join(", ") || "none",
-                risk: riskFromFindings(analysis && analysis.findings),
-            };
-        }
-
-        function findResourceItemByName(scriptName) {
-            const items = document.querySelectorAll(".incoming-resource-item");
-            for (const item of items) {
-                if ((item.dataset && item.dataset.name) === scriptName) {
-                    return item;
-                }
-            }
-            return null;
-        }
-
-        function renderIncomingResources() {
-            const container = document.getElementById("incoming-queue-list");
-            const loading = document.getElementById("incoming-queue-loading");
-            const empty = document.getElementById("incoming-queue-empty");
-
-            if (!incomingResourcesData || incomingResourcesData.length === 0) {
-                loading.style.display = "none";
-                empty.style.display = "block";
-                return;
-            }
-
-            loading.style.display = "none";
-
-            container.innerHTML = incomingResourcesData.map(resource => {
-                let badgesHtml = "";
-                if (resource.analyzed && resource.analysis) {
-                    badgesHtml = summaryBadgesHtml(summaryFromAnalysis(resource.analysis));
-                }
-                badgesHtml += stageBadgeHtml(resource);
-
-                const statusHtml = resource.analyzed
-                    ? `<span class="resource-status analyzed">Analyzed</span>`
-                    : `<span class="resource-status not-analyzed">Not analyzed yet</span>`;
-
-                const actionText = getActionLabel("safe");
-                const patchPlanActions = resource.analyzed
-                    ? `<button class="button secondary generate-plan-btn" data-script="${escapeHtml(resource.name)}">Generate Patch Plan</button>
-                       <button class="button secondary view-plan-btn" data-script="${escapeHtml(resource.name)}">View Patch Plan</button>`
-                    : "";
-                const promptActions = (resource.analyzed && resource.has_patch_plan)
-                    ? `<button class="button secondary generate-opencode-prompt-btn" data-script="${escapeHtml(resource.name)}">Generate OpenCode Prompt</button>
-                       <button class="button secondary view-opencode-prompt-btn" data-script="${escapeHtml(resource.name)}">View OpenCode Prompt</button>
-                       <button class="button secondary view-codex-prompt-btn" data-script="${escapeHtml(resource.name)}">View Codex Audit Prompt</button>`
-                    : "";
-                const stagingActions = resource.analyzed
-                    ? (resource.staging && resource.staging.exists
-                        ? postStageButtonsHtml(resource.name)
-                        : `<button class="button secondary stage-safe-copy-btn" data-script="${escapeHtml(resource.name)}">Stage Safe Copy</button>`)
-                    : "";
-
-                return `
-                    <div class="incoming-resource-item" data-name="${escapeHtml(resource.name)}">
-                        <div class="resource-header">
-                            <span class="resource-name">${escapeHtml(resource.name)}</span>
-                            <span class="resource-manifest">${escapeHtml(resource.manifest || "No manifest")}</span>
-                            ${statusHtml}
-                        </div>
-                        <div class="resource-badges">${badgesHtml}</div>
-                        <div class="resource-actions">
-                            <button class="button analyze-btn" data-script="${escapeHtml(resource.name)}">Analyze</button>
-                            ${resource.analyzed ? `<button class="button secondary view-report-btn" data-script="${escapeHtml(resource.name)}">View Report</button>` : ""}
-                            ${patchPlanActions}
-                            ${promptActions}
-                            ${stagingActions}
-                        </div>
-                    </div>
-                `;
-            }).join("");
-        }
-
-        async function analyzeResource(scriptName, button) {
-            const original = button.textContent;
-            button.disabled = true;
-            button.textContent = "Analyzing...";
-
-            try {
-                const response = await fetch("/api/incoming/" + encodeURIComponent(scriptName) + "/analyze", { method: "POST" });
-                const body = await response.json();
-
-                if (!response.ok) throw new Error(body.detail || body.error || "Analysis failed");
-
-                if (body.status === "success" && body.summary) {
-                    const s = body.summary;
-                    const actionText = getActionLabel(s.recommended_action);
-
-                    const item = findResourceItemByName(scriptName);
-                    if (item) {
-                        const badges = item.querySelector(".resource-badges");
-                        badges.innerHTML = summaryBadgesHtml(s) + `<span class="analysis-action">${escapeHtml(actionText)}</span>`;
-                        const status = item.querySelector(".resource-status");
-                        if (status) {
-                            status.className = "resource-status analyzed";
-                            status.textContent = "Analyzed";
-                        }
-
-                        const actions = item.querySelector(".resource-actions");
-                        const promptActions = resourceHasPatchPlan(scriptName)
-                            ? `<button class="button secondary generate-opencode-prompt-btn" data-script="${escapeHtml(scriptName)}">Generate OpenCode Prompt</button>
-                               <button class="button secondary view-opencode-prompt-btn" data-script="${escapeHtml(scriptName)}">View OpenCode Prompt</button>
-                               <button class="button secondary view-codex-prompt-btn" data-script="${escapeHtml(scriptName)}">View Codex Audit Prompt</button>`
-                            : "";
-                        const stageActions = resourceHasStaging(scriptName)
-                            ? postStageButtonsHtml(scriptName)
-                            : `<button class="button secondary stage-safe-copy-btn" data-script="${escapeHtml(scriptName)}">Stage Safe Copy</button>`;
-                        actions.innerHTML = `
-                            <button class="button secondary" disabled>Analyzed</button>
-                            <button class="button secondary view-report-btn" data-script="${escapeHtml(scriptName)}">View Report</button>
-                            <button class="button secondary generate-plan-btn" data-script="${escapeHtml(scriptName)}">Generate Patch Plan</button>
-                            <button class="button secondary view-plan-btn" data-script="${escapeHtml(scriptName)}">View Patch Plan</button>
-                            ${promptActions}
-                            ${stageActions}
-                        `;
-                    }
-                } else {
-                    throw new Error(body.error || "Analysis failed");
-                }
-            } catch (error) {
-                alert("Analysis failed: " + String(error.message || error));
-                button.textContent = original;
-                button.disabled = false;
-            }
-        }
-
-        document.addEventListener("click", function(event) {
-            const analyzeBtn = event.target.closest(".analyze-btn");
-            if (analyzeBtn) {
-                analyzeResource(analyzeBtn.dataset.script, analyzeBtn);
-                return;
-            }
-
-            const viewBtn = event.target.closest(".view-report-btn");
-            if (viewBtn) {
-                const scriptName = viewBtn.dataset.script;
-                window.location.href = "/dashboard-v2/report/" + encodeURIComponent(scriptName);
-                return;
-            }
-
-            const generatePlanBtn = event.target.closest(".generate-plan-btn");
-            if (generatePlanBtn) {
-                const scriptName = generatePlanBtn.dataset.script;
-                const original = generatePlanBtn.textContent;
-                generatePlanBtn.disabled = true;
-                generatePlanBtn.textContent = "Generating...";
-                fetch("/api/analysis/" + encodeURIComponent(scriptName) + "/generate-patch-plan", { method: "POST" })
-                    .then(async (response) => {
-                        const body = await response.json();
-                        if (!response.ok) throw new Error(body.detail || body.error || "Failed to generate patch plan");
-                        alert("Patch plan generated for " + scriptName);
-                        const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
-                        if (resource) resource.has_patch_plan = true;
-                        const item = findResourceItemByName(scriptName);
-                        if (item) {
-                            const actions = item.querySelector(".resource-actions");
-                            if (actions && !actions.querySelector(".generate-opencode-prompt-btn")) {
-                                actions.insertAdjacentHTML(
-                                    "beforeend",
-                                    `<button class="button secondary generate-opencode-prompt-btn" data-script="${escapeHtml(scriptName)}">Generate OpenCode Prompt</button>
-                                     <button class="button secondary view-opencode-prompt-btn" data-script="${escapeHtml(scriptName)}">View OpenCode Prompt</button>
-                                     <button class="button secondary view-codex-prompt-btn" data-script="${escapeHtml(scriptName)}">View Codex Audit Prompt</button>`
-                                );
-                            }
-                        }
-                    })
-                    .catch((error) => {
-                        alert("Patch plan generation failed: " + String(error.message || error));
-                    })
-                    .finally(() => {
-                        generatePlanBtn.disabled = false;
-                        generatePlanBtn.textContent = original;
-                    });
-                return;
-            }
-
-            const viewPlanBtn = event.target.closest(".view-plan-btn");
-            if (viewPlanBtn) {
-                const scriptName = viewPlanBtn.dataset.script;
-                openPatchPlanModal(scriptName)
-                    .catch((error) => {
-                        alert("View patch plan failed: " + String(error.message || error));
-                    });
-                return;
-            }
-
-            const generatePromptBtn = event.target.closest(".generate-opencode-prompt-btn");
-            if (generatePromptBtn) {
-                const scriptName = generatePromptBtn.dataset.script;
-                const original = generatePromptBtn.textContent;
-                generatePromptBtn.disabled = true;
-                generatePromptBtn.textContent = "Generating...";
-                fetch("/api/patch-plan/" + encodeURIComponent(scriptName) + "/generate-opencode-prompt", { method: "POST" })
-                    .then(async (response) => {
-                        const body = await response.json();
-                        if (!response.ok) throw new Error(body.detail || body.error || "Failed to generate prompts");
-                        alert("OpenCode and Codex prompts generated for " + scriptName);
-                    })
-                    .catch((error) => {
-                        alert("Prompt generation failed: " + String(error.message || error));
-                    })
-                    .finally(() => {
-                        generatePromptBtn.disabled = false;
-                        generatePromptBtn.textContent = original;
-                    });
-                return;
-            }
-
-            const stageSafeCopyBtn = event.target.closest(".stage-safe-copy-btn");
-            if (stageSafeCopyBtn) {
-                const scriptName = stageSafeCopyBtn.dataset.script;
-                const original = stageSafeCopyBtn.textContent;
-                stageSafeCopyBtn.disabled = true;
-                stageSafeCopyBtn.textContent = "Staging...";
-                fetch("/api/staging/" + encodeURIComponent(scriptName) + "/create", { method: "POST" })
-                    .then(async (response) => {
-                        const body = await response.json();
-                        if (!response.ok) throw new Error(body.detail || body.error || "Failed to create staging copy");
-                        const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
-                        if (resource) {
-                            resource.staging = { exists: true, status: String(body.staging_status || "STAGED"), approved_at: null };
-                        }
-                        renderIncomingResources();
-                    })
-                    .catch((error) => {
-                        alert("Stage Safe Copy failed: " + String(error.message || error));
-                    })
-                    .finally(() => {
-                        stageSafeCopyBtn.disabled = false;
-                        stageSafeCopyBtn.textContent = original;
-                    });
-                return;
-            }
-
-            const viewStagingDiffBtn = event.target.closest(".view-staging-diff-btn");
-            if (viewStagingDiffBtn) {
-                const scriptName = viewStagingDiffBtn.dataset.script;
-                fetch("/api/staging/" + encodeURIComponent(scriptName) + "/diff", { method: "GET" })
-                    .then(async (response) => {
-                        const body = await response.json();
-                        if (!response.ok) throw new Error(body.detail || body.error || "Failed to load staging diff");
-                        const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
-                        if (resource && resource.staging) {
-                            resource.staging.status = String(body.status || resource.staging.status || "READY");
-                        }
-                        openDocumentModal("Staging Diff", "Resource: " + scriptName, stagingDiffText(body));
-                        renderIncomingResources();
-                    })
-                    .catch((error) => {
-                        alert("View staging diff failed: " + String(error.message || error));
-                    });
-                return;
-            }
-
-            const approveStagingBtn = event.target.closest(".approve-staging-btn");
-            if (approveStagingBtn) {
-                const scriptName = approveStagingBtn.dataset.script;
-                fetch("/api/staging/" + encodeURIComponent(scriptName) + "/approve", { method: "POST" })
-                    .then(async (response) => {
-                        const body = await response.json();
-                        if (!response.ok) throw new Error(body.detail || body.error || "Approval failed");
-                        const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
-                        if (resource) {
-                            resource.staging = resource.staging || {};
-                            resource.staging.exists = true;
-                            resource.staging.status = "APPROVED";
-                            resource.staging.approved_at = body.approved_at || null;
-                        }
-                        renderIncomingResources();
-                    })
-                    .catch((error) => {
-                        alert("Approve staging failed: " + String(error.message || error));
-                    });
-                return;
-            }
-
-            const deleteStagingBtn = event.target.closest(".delete-staging-btn");
-            if (deleteStagingBtn) {
-                const scriptName = deleteStagingBtn.dataset.script;
-                fetch("/api/staging/" + encodeURIComponent(scriptName), { method: "DELETE" })
-                    .then(async (response) => {
-                        const body = await response.json();
-                        if (!response.ok) throw new Error(body.detail || body.error || "Delete staging failed");
-                        const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
-                        if (resource) {
-                            resource.staging = { exists: false, status: "NONE", approved_at: null };
-                        }
-                        renderIncomingResources();
-                    })
-                    .catch((error) => {
-                        alert("Delete staging copy failed: " + String(error.message || error));
-                    });
-                return;
-            }
-
-            const viewOpenCodePromptBtn = event.target.closest(".view-opencode-prompt-btn");
-            if (viewOpenCodePromptBtn) {
-                openPromptModal("opencode").catch((error) => {
-                    alert("View OpenCode prompt failed: " + String(error.message || error));
-                });
-                return;
-            }
-
-            const viewCodexPromptBtn = event.target.closest(".view-codex-prompt-btn");
-            if (viewCodexPromptBtn) {
-                openPromptModal("codex").catch((error) => {
-                    alert("View Codex prompt failed: " + String(error.message || error));
-                });
-            }
-        });
-
-        function resourceHasPatchPlan(scriptName) {
-            const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
-            return !!(resource && resource.has_patch_plan);
-        }
-
-        function resourceHasStaging(scriptName) {
-            const resource = (incomingResourcesData || []).find((item) => item && item.name === scriptName);
-            return !!(resource && resource.staging && resource.staging.exists);
-        }
-
-        wireDocumentModalBehavior();
-        renderIncomingResources();
         </script>
     '''
 
-    return render_layout("AgentOS FiveM Control Center", "dashboard-v2", content, extra_css, extra_js)
+    if use_cyber:
+        from apps.shared_layout import render_cyber_layout
+        host = controller.system_agent.stats()
+        topbar_stats = {
+            "cpu": f"{host.get('cpu_percent', 'n/a')}%",
+            "memory": f"{host.get('memory_percent', 'n/a')}%",
+            "active_tasks": str(stats.get("active", 0)),
+            "uptime": str(host.get("uptime", "n/a")),
+        }
+        return render_cyber_layout(
+            "Mission Control",
+            "dashboard",
+            content,
+            extra_css,
+            extra_js,
+            topbar_stats=topbar_stats,
+        )
+    return render_layout("ORCHESTRATOR_V1 Mission Control", "dashboard-v2", content, extra_css, extra_js)
 
 
 @app.post("/dashboard-v2/tasks/health-check")
@@ -6788,7 +6918,26 @@ def app_view_html(title: str, active: str, content: str, script: str = "", subti
         .log-line { grid-template-columns: 1fr; }
       }
     """
-    return render_layout(title, active, content, extra_css=extra_css, script=script, subtitle=subtitle)
+    try:
+        from apps.shared_layout import render_cyber_layout
+        shell_active = "dashboard" if active == "dashboard-v2" else active
+        host = controller.system_agent.stats()
+        topbar_stats = {
+            "cpu": f"{host.get('cpu_percent', 'n/a')}%",
+            "memory": f"{host.get('memory_percent', 'n/a')}%",
+            "active_tasks": str(host.get("tasks", "--")),
+            "uptime": str(host.get("uptime", "n/a")),
+        }
+        return render_cyber_layout(
+            title,
+            shell_active,
+            content,
+            extra_css=extra_css,
+            script=script,
+            topbar_stats=topbar_stats,
+        )
+    except ImportError:
+        return render_layout(title, active, content, extra_css=extra_css, script=script, subtitle=subtitle)
 
 
 @app.get("/commands", response_class=HTMLResponse)
@@ -7539,31 +7688,88 @@ def ops_cheat_sheet_page() -> str:
 
 @app.get("/logs", response_class=HTMLResponse)
 def logs_page() -> str:
-    content = """
-      <div class="logs-container">
-        <div class="logs-header">
-          <div class="logs-title">
-            <span class="logs-icon">📋</span>
-            <span>System Logs</span>
-            <span class="logs-badge" id="log-count">--</span>
+    agent_filters = [
+        ("system_watcher", "system_watcher"),
+        ("self_healing_agent", "self_healing_agent"),
+        ("coding_agent", "coding_agent"),
+        ("planner_agent", "planner_agent"),
+        ("builder_agent", "builder_agent"),
+    ]
+    agent_checks = "".join(
+        f"""
+        <label class="agent-check-row">
+          <input class="agent-check" type="checkbox" value="{esc(value)}" checked>
+          <span>{esc(label)}</span>
+        </label>
+        """
+        for value, label in agent_filters
+    )
+    known_sources_json = json.dumps([value for value, _label in agent_filters])
+    content = f"""
+      <section class="logs-workspace">
+        <article class="log-terminal">
+          <header class="terminal-head">
+            <div>
+              <span class="terminal-kicker">AGENT_LOG_STREAM</span>
+              <h1>System Logs</h1>
+            </div>
+            <div class="terminal-actions">
+              <button class="button secondary" type="button" id="clearBuffer">Clear Buffer</button>
+              <button class="button" type="button" id="exportCsv">Export CSV</button>
+            </div>
+          </header>
+          <div class="command-search">
+            <span>$</span>
+            <input id="logSearch" type="search" autocomplete="off" placeholder="search /agent-logs --message error --source planner_agent">
           </div>
-          <div class="logs-status">
-            <span class="status-dot" id="log-status-dot"></span>
-            <span id="log-status-text">Live</span>
+          <div class="terminal-table">
+            <div class="terminal-table-head">
+              <span>UTC_TIME</span><span>AGENT</span><span>LEVEL</span><span>EVENT</span>
+            </div>
+            <div class="terminal-stream" id="log-stream" role="log" aria-live="polite"></div>
           </div>
-        </div>
-        <div class="logs-panel glass" aria-label="System logs">
-          <div class="log-stream" id="log-stream" role="log" aria-live="polite"></div>
-        </div>
-        <div class="logs-footer">
-          <span class="logs-info">Auto-refresh: 3s</span>
-          <span class="logs-info">Showing last 50 entries</span>
-        </div>
-      </div>
+        </article>
+
+        <aside class="log-filter-rail">
+          <div class="filter-head">
+            <h2>Filters</h2>
+            <span id="filterCount">0 active</span>
+          </div>
+          <section class="filter-section">
+            <h3>Agents</h3>
+            <div class="agent-checks">{agent_checks}</div>
+          </section>
+          <section class="filter-section">
+            <h3>Date Range</h3>
+            <label class="date-field">Start<input id="dateStart" type="datetime-local"></label>
+            <label class="date-field">End<input id="dateEnd" type="datetime-local"></label>
+          </section>
+          <section class="log-stat-grid" aria-label="Log counters">
+            <article class="log-stat"><span>Ingestion</span><strong id="metric-ingestion">0</strong></article>
+            <article class="log-stat warn"><span>Warnings</span><strong id="metric-warning">0</strong></article>
+            <article class="log-stat danger"><span>Errors</span><strong id="metric-error">0</strong></article>
+          </section>
+          <button class="button apply-filters" type="button" id="applyFilters">Apply Filters</button>
+        </aside>
+
+        <footer class="log-status-strip">
+          <span>ROWS <strong id="statusRows">0</strong></span>
+          <span>LAST_REFRESH <strong id="statusLastRefresh">--</strong></span>
+          <span>SOURCE <strong>/agent-logs</strong></span>
+          <span>POLL <strong>3000ms</strong></span>
+        </footer>
+      </section>
     """
     script = """
       <script>
         const logStream = document.getElementById("log-stream");
+        const searchInput = document.getElementById("logSearch");
+        const dateStartInput = document.getElementById("dateStart");
+        const dateEndInput = document.getElementById("dateEnd");
+        const knownSources = new Set(KNOWN_SOURCES_PLACEHOLDER);
+        let allEntries = [];
+        let clearedAt = 0;
+        let appliedFilters = { query: "", sources: new Set(KNOWN_SOURCES_PLACEHOLDER), start: "", end: "" };
 
         function escapeHtml(value) {
           return String(value)
@@ -7576,69 +7782,411 @@ def logs_page() -> str:
 
         function normalizeLogLevel(entry) {
           const level = String(entry.level || "").toLowerCase();
-          if (level === "warning" || String(entry.message || "").startsWith("WARNING:")) {
-            return "warning";
-          }
-          if (level === "error" || String(entry.message || "").startsWith("ERROR:")) {
-            return "error";
-          }
+          if (level === "warning" || String(entry.message || "").startsWith("WARNING:")) return "warning";
+          if (level === "error" || String(entry.message || "").startsWith("ERROR:")) return "error";
           return "info";
         }
 
         function formatLogTime(value) {
           const date = value ? new Date(value) : new Date();
-          if (Number.isNaN(date.getTime())) {
-            return new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-          }
-          return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+          if (Number.isNaN(date.getTime())) return "--";
+          return date.toISOString().replace("T", " ").slice(0, 19);
         }
 
-        function renderLogs(logs) {
-          const entries = Array.isArray(logs) ? logs.slice(-50) : [];
-          if (entries.length === 0) {
-            logStream.innerHTML = '<div class="log-line"><span class="log-time">--</span><span class="log-source">system</span><span class="log-level">INFO</span><span class="log-message">No logs available.</span></div>';
+        function parseFilterDate(value) {
+          if (!value) return null;
+          const date = new Date(value);
+          return Number.isNaN(date.getTime()) ? null : date;
+        }
+
+        function activeSourcesFromUi() {
+          return new Set(Array.from(document.querySelectorAll(".agent-check:checked")).map((el) => el.value));
+        }
+
+        function filteredEntries() {
+          const query = appliedFilters.query.toLowerCase();
+          const start = parseFilterDate(appliedFilters.start);
+          const end = parseFilterDate(appliedFilters.end);
+          return allEntries.filter((entry) => {
+            const src = String(entry.source || "agent");
+            if (knownSources.has(src) && !appliedFilters.sources.has(src)) return false;
+            const date = entry.timestamp ? new Date(entry.timestamp) : null;
+            if (start && date && date < start) return false;
+            if (end && date && date > end) return false;
+            if (query) {
+              const haystack = [src, normalizeLogLevel(entry), entry.message || ""].join(" ").toLowerCase();
+              if (!haystack.includes(query)) return false;
+            }
+            return true;
+          });
+        }
+
+        function updateMetrics(entries) {
+          const warning = entries.filter((e) => normalizeLogLevel(e) === "warning").length;
+          const error = entries.filter((e) => normalizeLogLevel(e) === "error").length;
+          document.getElementById("metric-ingestion").textContent = String(allEntries.length);
+          document.getElementById("metric-warning").textContent = String(warning);
+          document.getElementById("metric-error").textContent = String(error);
+          document.getElementById("statusRows").textContent = String(entries.length);
+          document.getElementById("filterCount").textContent = String(entries.length) + " rows";
+        }
+
+        function renderLogs() {
+          const entries = filteredEntries().slice(-160);
+          if (!entries.length) {
+            logStream.innerHTML = '<div class="log-row empty"><span>--</span><span>logs</span><span><span class="log-level-pill info">INFO</span></span><span class="log-message">No logs match current filters.</span></div>';
+            updateMetrics(entries);
             return;
           }
           logStream.innerHTML = entries.map((entry) => {
             const level = normalizeLogLevel(entry);
-            return '<div class="log-line ' + level + '"><span class="log-time">' + escapeHtml(formatLogTime(entry.timestamp)) + '</span><span class="log-source">' + escapeHtml(entry.source || "agent") + '</span><span class="log-level">' + level.toUpperCase() + '</span><span class="log-message">' + escapeHtml(entry.message || "") + '</span></div>';
+            return '<div class="log-row ' + level + '"><span>' + escapeHtml(formatLogTime(entry.timestamp)) + '</span><span>' + escapeHtml(entry.source || "agent") + '</span><span><span class="log-level-pill ' + level + '">' + level.toUpperCase() + '</span></span><span class="log-message">' + escapeHtml(entry.message || "") + '</span></div>';
           }).join("");
+          updateMetrics(entries);
           logStream.scrollTop = logStream.scrollHeight;
+        }
+
+        function applyFilters() {
+          appliedFilters = {
+            query: searchInput ? searchInput.value.trim() : "",
+            sources: activeSourcesFromUi(),
+            start: dateStartInput ? dateStartInput.value : "",
+            end: dateEndInput ? dateEndInput.value : ""
+          };
+          renderLogs();
         }
 
         async function refreshLogs() {
           try {
-            const response = await fetch("/agent-logs?limit=50", { cache: "no-store" });
-            if (!response.ok) {
-              throw new Error("Log request failed");
-            }
+            const response = await fetch("/agent-logs?limit=120", { cache: "no-store" });
+            if (!response.ok) throw new Error("Log request failed");
             const data = await response.json();
-            renderLogs(data.logs);
-            const logCountEl = document.getElementById("log-count");
-            const logStatusDot = document.getElementById("log-status-dot");
-            const logStatusText = document.getElementById("log-status-text");
-            if (logCountEl) logCountEl.textContent = data.logs.length;
-            if (data.status && data.status.running) {
-              if (logStatusDot) logStatusDot.style.background = "var(--ao-green)";
-              if (logStatusText) logStatusText.textContent = "Live";
-            } else {
-              if (logStatusDot) logStatusDot.style.background = "var(--ao-danger)";
-              if (logStatusText) logStatusText.textContent = "Stopped";
-            }
-          } catch (error) {
-            renderLogs([{ source: "logs", level: "error", message: "Log refresh failed.", timestamp: new Date().toISOString() }]);
-            const logStatusDot = document.getElementById("log-status-dot");
-            const logStatusText = document.getElementById("log-status-text");
-            if (logStatusDot) logStatusDot.style.background = "var(--ao-danger)";
-            if (logStatusText) logStatusText.textContent = "Error";
+            const logs = Array.isArray(data.logs) ? data.logs : [];
+            allEntries = clearedAt ? logs.filter((entry) => {
+              const date = entry.timestamp ? new Date(entry.timestamp) : null;
+              return date && date.getTime() > clearedAt;
+            }) : logs;
+            document.getElementById("statusLastRefresh").textContent = new Date().toISOString().slice(11, 19) + " UTC";
+            renderLogs();
+          } catch (_) {
+            allEntries = [{ source: "logs", level: "error", message: "Log refresh failed.", timestamp: new Date().toISOString() }];
+            renderLogs();
           }
         }
+
+        function csvEscape(value) {
+          const text = String(value ?? "");
+          return '"' + text.replaceAll('"', '""') + '"';
+        }
+
+        function exportCsv() {
+          const rows = filteredEntries();
+          const csv = ["timestamp,source,level,message"].concat(rows.map((entry) => [
+            entry.timestamp || "",
+            entry.source || "agent",
+            normalizeLogLevel(entry),
+            entry.message || ""
+          ].map(csvEscape).join(","))).join("\\n");
+          const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = "agent-logs.csv";
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          URL.revokeObjectURL(url);
+        }
+
+        document.getElementById("applyFilters")?.addEventListener("click", applyFilters);
+        document.getElementById("exportCsv")?.addEventListener("click", exportCsv);
+        document.getElementById("clearBuffer")?.addEventListener("click", () => {
+          clearedAt = Date.now();
+          allEntries = [];
+          renderLogs();
+        });
+        searchInput?.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            applyFilters();
+          }
+        });
 
         refreshLogs();
         setInterval(refreshLogs, 3000);
       </script>
+    """.replace("KNOWN_SOURCES_PLACEHOLDER", known_sources_json)
+    try:
+        from apps.shared_layout import render_cyber_layout
+        host = controller.system_agent.stats()
+        return render_cyber_layout(
+            "System Logs",
+            "logs",
+            content,
+            extra_css=_logs_page_css(),
+            script=script,
+            topbar_stats={
+                "title": "System Logs",
+                "cpu": f"{host.get('cpu_percent', 'n/a')}%",
+                "memory": f"{host.get('memory_percent', 'n/a')}%",
+                "active_tasks": "logs",
+                "uptime": str(host.get("uptime", "n/a")),
+            },
+        )
+    except ImportError:
+        return app_view_html("System Logs", "logs", content, script)
+
+
+def _logs_page_css() -> str:
+    return """
+      .logs-workspace{
+        display:grid;
+        grid-template-columns:minmax(0,1fr) 320px;
+        grid-template-rows:minmax(0,1fr) auto;
+        gap:12px;
+        min-width:0;
+      }
+      .log-terminal,.log-filter-rail,.log-status-strip{
+        border:1px solid rgba(0,242,255,.2);
+        border-radius:4px;
+        background:#0d1c2d;
+        min-width:0;
+      }
+      .log-terminal{
+        display:flex;
+        flex-direction:column;
+        overflow:hidden;
+      }
+      .terminal-head{
+        display:flex;
+        justify-content:space-between;
+        align-items:flex-start;
+        gap:12px;
+        padding:12px;
+        border-bottom:1px solid rgba(0,242,255,.2);
+        background:#122131;
+      }
+      .terminal-kicker{
+        display:block;
+        margin-bottom:3px;
+        color:#00f2ff;
+        font-family:'JetBrains Mono',ui-monospace,monospace;
+        font-size:10px;
+        letter-spacing:.08em;
+      }
+      .terminal-head h1{
+        margin:0;
+        color:#e0f4ff;
+        font-size:17px;
+        letter-spacing:.04em;
+      }
+      .terminal-actions{
+        display:flex;
+        flex-wrap:wrap;
+        gap:8px;
+        justify-content:flex-end;
+      }
+      .command-search{
+        display:grid;
+        grid-template-columns:auto minmax(0,1fr);
+        gap:8px;
+        align-items:center;
+        margin:12px;
+        border:1px solid rgba(0,242,255,.18);
+        border-radius:4px;
+        background:#010f1f;
+        padding:8px 10px;
+      }
+      .command-search span{
+        color:#00f2ff;
+        font-family:'JetBrains Mono',ui-monospace,monospace;
+        font-weight:800;
+      }
+      .command-search input{
+        width:100%;
+        border:0;
+        outline:0;
+        background:transparent;
+        color:#e0f4ff;
+        font-family:'JetBrains Mono',ui-monospace,monospace;
+        font-size:12px;
+      }
+      .terminal-table{
+        margin:0 12px 12px;
+        border:1px solid rgba(0,242,255,.16);
+        border-radius:4px;
+        overflow:hidden;
+        min-width:0;
+      }
+      .terminal-table-head,.log-row{
+        display:grid;
+        grid-template-columns:150px 150px 76px minmax(0,1fr);
+        gap:8px;
+        align-items:center;
+        min-width:0;
+      }
+      .terminal-table-head{
+        background:rgba(0,242,255,.1);
+        color:#95f7ff;
+        font-size:10px;
+        letter-spacing:.08em;
+        padding:7px 9px;
+        font-family:'JetBrains Mono',ui-monospace,monospace;
+      }
+      .terminal-stream{
+        max-height:calc(100vh - 250px);
+        min-height:500px;
+        overflow:auto;
+        background:#010f1f;
+      }
+      .log-row{
+        border-top:1px solid rgba(0,242,255,.09);
+        padding:6px 9px;
+        color:#c5ddf4;
+        font-family:'JetBrains Mono',ui-monospace,monospace;
+        font-size:11px;
+        line-height:1.35;
+      }
+      .log-row.error{color:#ff9ab0}
+      .log-row.warning{color:#ffd27a}
+      .log-row.empty{color:#7f99b2}
+      .log-level-pill{
+        display:inline-flex;
+        justify-content:center;
+        min-width:52px;
+        border:1px solid rgba(0,242,255,.18);
+        border-radius:4px;
+        padding:2px 6px;
+        font-size:10px;
+        font-weight:800;
+      }
+      .log-level-pill.error{border-color:rgba(255,95,122,.36);color:#ff8fa7;background:rgba(255,95,122,.12)}
+      .log-level-pill.warning{border-color:rgba(255,200,87,.35);color:#ffd27a;background:rgba(255,200,87,.12)}
+      .log-level-pill.info{border-color:rgba(0,242,255,.35);color:#8df7ff;background:rgba(0,242,255,.1)}
+      .log-message{
+        min-width:0;
+        overflow-wrap:anywhere;
+      }
+      .log-filter-rail{
+        padding:12px;
+        display:flex;
+        flex-direction:column;
+        gap:12px;
+      }
+      .filter-head{
+        display:flex;
+        justify-content:space-between;
+        gap:8px;
+        align-items:center;
+      }
+      .filter-head h2,.filter-section h3{
+        margin:0;
+        color:#93f7ff;
+        font-size:12px;
+        letter-spacing:.08em;
+        text-transform:uppercase;
+      }
+      .filter-head span{
+        color:#7f99b2;
+        font-size:11px;
+      }
+      .filter-section{
+        display:grid;
+        gap:8px;
+        min-width:0;
+      }
+      .agent-checks{
+        display:grid;
+        gap:6px;
+      }
+      .agent-check-row{
+        display:grid;
+        grid-template-columns:auto minmax(0,1fr);
+        gap:8px;
+        align-items:center;
+        border:1px solid rgba(0,242,255,.14);
+        border-radius:4px;
+        background:#010f1f;
+        padding:7px 8px;
+        color:#c8ddf2;
+        font-family:'JetBrains Mono',ui-monospace,monospace;
+        font-size:11px;
+      }
+      .agent-check-row input{
+        accent-color:#00dbe7;
+      }
+      .date-field{
+        display:grid;
+        gap:5px;
+        color:#7f99b2;
+        font-size:10px;
+        letter-spacing:.08em;
+        text-transform:uppercase;
+      }
+      .date-field input{
+        width:100%;
+        border:1px solid rgba(0,242,255,.18);
+        border-radius:4px;
+        background:#010f1f;
+        color:#e0f4ff;
+        min-height:34px;
+        padding:6px 8px;
+        font-family:'JetBrains Mono',ui-monospace,monospace;
+        font-size:11px;
+      }
+      .log-stat-grid{
+        display:grid;
+        grid-template-columns:1fr;
+        gap:8px;
+      }
+      .log-stat{
+        border:1px solid rgba(0,242,255,.16);
+        border-radius:4px;
+        background:#122131;
+        padding:9px;
+      }
+      .log-stat span{
+        display:block;
+        margin-bottom:4px;
+        color:#7f99b2;
+        font-size:10px;
+        letter-spacing:.08em;
+        text-transform:uppercase;
+      }
+      .log-stat strong{
+        color:#e0f4ff;
+        font-size:18px;
+      }
+      .log-stat.warn strong{color:#ffc857}
+      .log-stat.danger strong{color:#ff5f7a}
+      .apply-filters{
+        width:100%;
+        justify-content:center;
+      }
+      .log-status-strip{
+        grid-column:1 / -1;
+        display:flex;
+        flex-wrap:wrap;
+        justify-content:space-between;
+        gap:10px;
+        padding:8px 10px;
+        color:#7f99b2;
+        font-family:'JetBrains Mono',ui-monospace,monospace;
+        font-size:11px;
+      }
+      .log-status-strip strong{
+        color:#00f2ff;
+      }
+      @media (max-width:1200px){
+        .logs-workspace{grid-template-columns:1fr}
+        .terminal-stream{min-height:420px}
+      }
+      @media (max-width:760px){
+        .terminal-head{display:grid}
+        .terminal-actions{justify-content:flex-start}
+        .terminal-table-head,.log-row{grid-template-columns:112px 112px 68px minmax(0,1fr)}
+      }
     """
-    return app_view_html("AgentOS Logs", "logs", content, script)
 
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -7664,182 +8212,164 @@ def settings_page() -> str:
 @app.get("/agents", response_class=HTMLResponse)
 def agents_page() -> str:
     agents = agent_registry_snapshot()
-    cards = []
+    online = sum(1 for agent in agents if str(agent.get("status", "")).lower() == "online")
+    offline = max(0, len(agents) - online)
+
+    rows = []
     for agent in agents:
-        target = agent.get("url") or agent.get("path") or "No path"
-        action = agent.get("suggested_action", "")
-        action_links = []
-        if agent.get("url"):
-            target_attrs = ' target="_blank" rel="noopener noreferrer"' if str(agent["url"]).startswith(("http://", "https://")) else ""
-            action_links.append(f'<a class="button" href="{esc(agent["url"])}"{target_attrs}>Open AgentOS page</a>')
-        if agent.get("direct_service_url"):
-            action_links.append(
-                f'<a class="button secondary" href="{esc(agent["direct_service_url"])}" target="_blank" rel="noopener noreferrer">Open direct service</a>'
-            )
-        open_link = "".join(action_links)
-        cards.append(
+        status = str(agent.get("status", "unknown")).lower()
+        status_class = "ok" if status == "online" else "danger" if status in {"offline", "stopped", "failed"} else "warn"
+        label = str(agent.get("display_name", "agent"))
+        route = str(agent.get("url") or "")
+        action = (
+            f'<a class="button secondary" href="{esc(route)}"'
+            + (' target="_blank" rel="noopener noreferrer"' if route.startswith(("http://", "https://")) else "")
+            + ">Open</a>"
+            if route
+            else '<span class="agent-empty">No route</span>'
+        )
+        rows.append(
             f"""
-            <article class="registry-card glass">
-              <div class="registry-card-top">
-                <span class="registry-icon">{esc(agent.get("icon", ""))}</span>
-                <div>
-                  <h2>{esc(agent.get("display_name", ""))}</h2>
-                  <p>{esc(agent.get("description", ""))}</p>
-                </div>
-                <div class="registry-badges">{render_agent_badges(agent)}</div>
-              </div>
-              <dl class="registry-details">
-                <div><dt>Role</dt><dd>{esc(agent.get("type", ""))}</dd></div>
-                <div><dt>Status</dt><dd>{esc(agent.get("status", ""))}</dd></div>
-                <div><dt>Service</dt><dd>{esc(agent.get("service_name") or "no service")}</dd></div>
-                <div><dt>Path / URL</dt><dd>{esc(target)}</dd></div>
-                {"<div><dt>Direct service</dt><dd>" + esc(agent.get("direct_service_url", "")) + "</dd></div>" if agent.get("direct_service_url") else ""}
-                <div><dt>Suggested action</dt><dd>{esc(action)}</dd></div>
-              </dl>
-              <div class="registry-actions">{open_link}</div>
-            </article>
+            <div class="agent-row">
+              <span class="agent-name">{esc(label)}</span>
+              <span class="agent-type">{esc(agent.get("type", "unknown"))}</span>
+              <span class="agent-service">{esc(agent.get("service_name") or "none")}</span>
+              <span class="agent-status {status_class}">{esc(status.upper())}</span>
+              <span class="agent-action">{action}</span>
+            </div>
             """
         )
+
     content = f"""
       <style>
-        .registry-header {{
-          display: flex;
-          align-items: end;
-          justify-content: space-between;
-          gap: 16px;
-          margin-bottom: 16px;
-          padding: 18px;
-        }}
-
-        .registry-header h1 {{
-          margin: 0;
-          color: var(--text);
-          font-size: 30px;
-          letter-spacing: 0;
-        }}
-
-        .registry-header p {{
-          max-width: 720px;
-          margin: 7px 0 0;
-          color: var(--muted);
-          font-size: 14px;
-          line-height: 1.5;
-        }}
-
-        .registry-count {{
-          flex: 0 0 auto;
-          border: 1px solid rgba(55, 214, 122, 0.26);
-          border-radius: 999px;
-          padding: 7px 11px;
-          color: var(--green);
-          background: rgba(21, 128, 61, 0.12);
-          font-size: 12px;
-          font-weight: 800;
-        }}
-
-        .registry-grid {{
+        .agents-shell {{
           display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 14px;
-        }}
-
-        .registry-card {{
-          display: grid;
-          gap: 12px;
-          padding: 15px;
-        }}
-
-        .registry-card-top {{
-          display: grid;
-          grid-template-columns: auto minmax(0, 1fr);
+          grid-template-columns: 320px minmax(0, 1fr);
           gap: 10px;
-          align-items: start;
+          min-width: 0;
         }}
-
-        .registry-icon {{
-          display: inline-grid;
-          place-items: center;
-          width: 34px;
-          height: 34px;
-          border: 1px solid rgba(125, 211, 252, 0.22);
-          border-radius: 10px;
-          background: rgba(96, 165, 250, 0.1);
+        .agents-summary, .agents-table {{
+          border: 1px solid rgba(0, 242, 255, 0.2);
+          border-radius: 4px;
+          background: rgba(13, 28, 45, 0.9);
+          min-width: 0;
+          padding: 10px;
         }}
-
-        .registry-card h2 {{
-          margin: 0;
-          color: var(--text);
-          font-size: 17px;
-          letter-spacing: 0;
-        }}
-
-        .registry-card p {{
-          margin: 5px 0 0;
-          color: var(--muted);
+        .agents-summary h2, .agents-table h2 {{
+          margin: 0 0 8px;
           font-size: 13px;
-          line-height: 1.45;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: #92f5ff;
         }}
-
-        .registry-badges {{
-          grid-column: 1 / -1;
-          display: flex;
-          flex-wrap: wrap;
-          gap: 5px;
-        }}
-
-        .registry-details {{
+        .summary-grid {{
           display: grid;
-          gap: 7px;
-          margin: 0;
-          color: var(--muted);
-          font-size: 12px;
-        }}
-
-        .registry-details div {{
-          display: grid;
-          grid-template-columns: 110px minmax(0, 1fr);
           gap: 8px;
         }}
-
-        .registry-details dt {{
-          color: var(--soft);
-          font-weight: 800;
+        .summary-item {{
+          border: 1px solid rgba(0, 242, 255, 0.16);
+          border-radius: 4px;
+          background: rgba(4, 12, 21, 0.74);
+          padding: 8px;
+        }}
+        .summary-item span {{
+          display: block;
+          color: #8da8c4;
+          font-size: 10px;
           text-transform: uppercase;
+          letter-spacing: 0.08em;
+          margin-bottom: 4px;
         }}
+        .summary-item strong {{ font-size: 18px; color: #dff2ff; }}
+        .summary-item strong.ok {{ color: #00ff9f; }}
+        .summary-item strong.danger {{ color: #ff5f7a; }}
 
-        .registry-details dd {{
+        .agents-head, .agent-row {{
+          display: grid;
+          grid-template-columns: minmax(160px, 1.3fr) 90px 110px 100px 92px;
+          gap: 8px;
+          align-items: center;
           min-width: 0;
-          margin: 0;
-          overflow-wrap: anywhere;
         }}
-
-        .registry-actions {{
+        .agents-head {{
+          border: 1px solid rgba(0, 242, 255, 0.2);
+          border-radius: 4px;
+          background: rgba(0, 242, 255, 0.11);
+          color: #94f7ff;
+          font-size: 10px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          padding: 7px 8px;
+          margin-bottom: 6px;
+        }}
+        .agent-rows {{
+          max-height: 620px;
+          overflow: auto;
           display: flex;
-          justify-content: flex-end;
+          flex-direction: column;
+          gap: 6px;
         }}
-
+        .agent-row {{
+          border: 1px solid rgba(0, 242, 255, 0.14);
+          border-radius: 4px;
+          background: rgba(4, 11, 20, 0.76);
+          padding: 7px 8px;
+          color: #c6dcf4;
+          font-size: 11px;
+        }}
+        .agent-name {{
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: #e7f4ff;
+          font-weight: 700;
+        }}
+        .agent-type, .agent-service {{ color: #9ab2cb; text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }}
+        .agent-status {{
+          display: inline-flex;
+          justify-content: center;
+          border: 1px solid rgba(0, 242, 255, 0.2);
+          border-radius: 4px;
+          padding: 2px 6px;
+          font-size: 10px;
+          font-weight: 700;
+        }}
+        .agent-status.ok {{ color: #00ff9f; border-color: rgba(0, 255, 159, 0.34); background: rgba(0, 255, 159, 0.12); }}
+        .agent-status.warn {{ color: #ffc857; border-color: rgba(255, 200, 87, 0.34); background: rgba(255, 200, 87, 0.12); }}
+        .agent-status.danger {{ color: #ff5f7a; border-color: rgba(255, 95, 122, 0.34); background: rgba(255, 95, 122, 0.12); }}
+        .agent-empty {{ font-size: 10px; color: #7f97af; }}
+        .agent-action {{ display: flex; justify-content: flex-end; }}
+        @media (max-width: 1200px) {{
+          .agents-shell {{ grid-template-columns: 1fr; }}
+        }}
         @media (max-width: 900px) {{
-          .registry-grid {{ grid-template-columns: 1fr; }}
-          .registry-header {{ display: grid; align-items: start; }}
-        }}
-
-        @media (max-width: 520px) {{
-          .registry-details div {{ grid-template-columns: 1fr; }}
-          .registry-actions {{ justify-content: flex-start; }}
+          .agents-head, .agent-row {{
+            grid-template-columns: minmax(140px, 1fr) 80px 80px 80px 80px;
+          }}
         }}
       </style>
-      <section class="registry-header glass">
-        <div>
-          <h1>Agents</h1>
-          <p>All known AgentOS dashboards, workers, CLIs, bots, services, and planned tools. Inactive entries are inventory, not failures.</p>
-        </div>
-        <div class="registry-count">{len(agents)} entries</div>
-      </section>
-      <section class="registry-grid" aria-label="Agent registry">
-        {"".join(cards)}
+      <section class="agents-shell">
+        <aside class="agents-summary">
+          <h2>Active Agents</h2>
+          <div class="summary-grid">
+            <div class="summary-item"><span>Total Agents</span><strong>{len(agents)}</strong></div>
+            <div class="summary-item"><span>Online</span><strong class="ok">{online}</strong></div>
+            <div class="summary-item"><span>Offline</span><strong class="danger">{offline}</strong></div>
+          </div>
+        </aside>
+        <article class="agents-table">
+          <h2>Agent Matrix</h2>
+          <div class="agents-head">
+            <span>Agent</span><span>Type</span><span>Service</span><span>Status</span><span>Action</span>
+          </div>
+          <div class="agent-rows">
+            {"".join(rows)}
+          </div>
+        </article>
       </section>
     """
-    return app_view_html("AgentOS Agents", "agents", content)
+    return app_view_html("Active Agents", "agents", content)
 
 
 def _response_body_text(response: HTMLResponse) -> str:
@@ -8847,23 +9377,631 @@ def coding_review_page(task_id: str) -> str:
 
 @app.get("/reviews", response_class=HTMLResponse)
 def reviews_index_page() -> str:
+    resources = _get_incoming_resources_with_analysis(limit=24)
+    tree_items: list[str] = []
+    for resource in resources:
+        status = "Analyzed" if resource.get("analyzed") else "Pending"
+        marker = "READY" if resource.get("has_patch_plan") else status.upper()
+        tree_items.append(
+            f'<li><span class="file-name">{esc(resource.get("name", "unknown"))}</span>'
+            f'<span class="file-meta">{esc(marker)}</span></li>'
+        )
+    tree_html = "".join(tree_items) or '<li><span class="file-name">No incoming resources</span><span class="file-meta">EMPTY</span></li>'
+
+    op_prompt = BASE_DIR / "orchestrator" / "prompts" / "opencode-next.md"
+    codex_prompt = BASE_DIR / "orchestrator" / "prompts" / "codex-audit-next.md"
+    health_score = 0
+    if op_prompt.exists() and op_prompt.stat().st_size > 0:
+        health_score += 50
+    if codex_prompt.exists() and codex_prompt.stat().st_size > 0:
+        health_score += 50
+
+    analyzed_count = sum(1 for resource in resources if resource.get("analyzed"))
+    patch_plan_count = sum(1 for resource in resources if resource.get("has_patch_plan"))
+    staged_count = sum(
+        1
+        for resource in resources
+        if isinstance(resource.get("staging"), dict) and resource.get("staging", {}).get("exists")
+    )
+
+    prompt_specs = [
+        ("opencode", "OPENCODE", BASE_DIR / "orchestrator" / "prompts" / "opencode-next.md", "/api/prompts/opencode-next"),
+        ("gemini", "GEMINI", BASE_DIR / "orchestrator" / "prompts" / "gemini-plan-latest.md", ""),
+        ("codex", "CODEX", BASE_DIR / "orchestrator" / "prompts" / "codex-audit-next.md", "/api/prompts/codex-audit-next"),
+    ]
+    prompt_cards: list[str] = []
+    for key, label, path, endpoint in prompt_specs:
+        exists = path.is_file() and path.stat().st_size > 0
+        preview = _read_text_preview(path, 2400) if exists else "Prompt file has not been generated yet."
+        updated = _format_timestamp(datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()) if exists else "Not generated"
+        load_attr = f'data-endpoint="{esc(endpoint)}"' if endpoint else f'data-inline-target="prompt-preview-{esc(key)}"'
+        prompt_cards.append(
+            f"""
+            <article class="prompt-card model-{esc(key)}">
+              <div class="prompt-card-head">
+                <span class="model-ref">MODEL_REF: {esc(label)}</span>
+                <span class="prompt-state {'ready' if exists else 'missing'}">{'READY' if exists else 'MISSING'}</span>
+              </div>
+              <pre id="prompt-preview-{esc(key)}" class="prompt-preview">{esc(preview)}</pre>
+              <div class="prompt-card-foot">
+                <span>{esc(updated)}</span>
+                <div>
+                  <button class="button secondary load-prompt-card" type="button" data-label="{esc(label)}" {load_attr}>Load</button>
+                  <button class="button secondary copy-prompt-card" type="button" data-target="prompt-preview-{esc(key)}">Copy</button>
+                </div>
+              </div>
+            </article>
+            """
+        )
+
+    artifact_rows = []
+    for report in _report_entries(6):
+        artifact_rows.append(
+            f"""
+            <a class="artifact-row" href="{esc(report['view_url'])}">
+              <span>{esc(report['name'])}</span>
+              <small>{esc(report['folder'])} · {esc(_format_timestamp(report['updated_at']))}</small>
+            </a>
+            """
+        )
+    artifacts_html = "".join(artifact_rows) or '<div class="artifact-empty">No report artifacts yet.</div>'
+
     content = f"""
-      <section class="agent-panel">
-        <h2>Reviews and Reports</h2>
-        <p>Human-readable reports from AI checks and Coding Agent staging output. Review these before manually applying any script changes.</p>
-        <div class="agent-actions">
-          <a class="button" href="/reports/daily">Open Daily Coding Digest</a>
-          <a class="button secondary" href="/upload">Open Upload Pipeline</a>
-        </div>
+      <style>
+        .review-shell {{
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          min-width: 0;
+        }}
+        .review-header {{
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: flex-start;
+        }}
+        .review-header h2 {{
+          margin: 0 0 6px;
+          font-size: 16px;
+          color: #dff4ff;
+          letter-spacing: 0.04em;
+        }}
+        .review-header p {{
+          margin: 0;
+          color: #9eb9d4;
+          font-size: 12px;
+          line-height: 1.45;
+        }}
+        .review-badge {{
+          display: inline-flex;
+          border: 1px solid rgba(0, 242, 255, 0.32);
+          border-radius: 4px;
+          padding: 4px 8px;
+          color: #8df7ff;
+          background: rgba(0, 242, 255, 0.12);
+          font-size: 10px;
+          font-weight: 700;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          white-space: nowrap;
+        }}
+        .review-status-grid {{
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 8px;
+          min-width: 0;
+        }}
+        .review-status-card {{
+          border: 1px solid rgba(0, 242, 255, 0.18);
+          border-radius: 4px;
+          background: rgba(5, 14, 25, 0.75);
+          padding: 8px;
+          min-width: 0;
+        }}
+        .review-status-card span {{
+          display: block;
+          color: #8da8c4;
+          font-size: 10px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          margin-bottom: 4px;
+        }}
+        .review-status-card strong {{
+          font-size: 15px;
+          color: #e7f4ff;
+        }}
+        .review-status-card .ok {{ color: #00ff9f; }}
+
+        .settings-bar {{
+          display: grid;
+          grid-template-columns: minmax(170px, 220px) minmax(0, 1fr) minmax(170px, 220px) auto;
+          gap: 10px;
+          align-items: end;
+          border: 1px solid rgba(0, 242, 255, 0.2);
+          border-radius: 4px;
+          background: #010f1f;
+          padding: 10px;
+          min-width: 0;
+        }}
+        .setting-field {{
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 5px;
+        }}
+        .setting-field label {{
+          color: #7f99b2;
+          font-family: 'JetBrains Mono', ui-monospace, monospace;
+          font-size: 10px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }}
+        .setting-field select,
+        .setting-field input {{
+          border: 1px solid rgba(0, 242, 255, 0.22);
+          border-radius: 4px;
+          background: #0d1c2d;
+          color: #e0f4ff;
+          min-height: 34px;
+          padding: 6px 8px;
+        }}
+        .segmented {{
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+        }}
+        .segmented button {{
+          min-height: 34px;
+        }}
+
+        .review-split {{
+          display: grid;
+          grid-template-columns: repeat(12, minmax(0, 1fr));
+          gap: 10px;
+          min-width: 0;
+        }}
+        .review-col-left {{ grid-column: span 3; }}
+        .review-col-center {{ grid-column: span 6; }}
+        .review-col-right {{ grid-column: span 3; }}
+
+        .review-pane {{
+          border: 1px solid rgba(0, 242, 255, 0.18);
+          border-radius: 4px;
+          background: rgba(13, 28, 45, 0.9);
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+        }}
+        .review-pane h3 {{
+          margin: 0;
+          padding: 10px;
+          border-bottom: 1px solid rgba(0, 242, 255, 0.2);
+          font-size: 12px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: #8cf7ff;
+        }}
+        .review-pane-body {{
+          padding: 10px;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }}
+        .files-tree {{
+          list-style: none;
+          margin: 0;
+          padding: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          max-height: 520px;
+          overflow: auto;
+        }}
+        .files-tree li {{
+          display: flex;
+          justify-content: space-between;
+          gap: 8px;
+          border: 1px solid rgba(0, 242, 255, 0.14);
+          border-radius: 4px;
+          padding: 6px 8px;
+          background: rgba(4, 12, 21, 0.7);
+        }}
+        .file-name {{
+          color: #d6ecff;
+          font-family: ui-monospace, monospace;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }}
+        .file-meta {{
+          color: #8ca8c4;
+          font-size: 10px;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          white-space: nowrap;
+        }}
+        .score-pill {{
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          border: 1px solid rgba(0, 242, 255, 0.22);
+          border-radius: 4px;
+          padding: 4px 8px;
+          font-size: 11px;
+          color: #b6ddff;
+          width: fit-content;
+        }}
+        .score-value {{ color: #00ff9f; font-weight: 700; }}
+        .review-output {{
+          margin: 0;
+          min-height: 460px;
+          max-height: 520px;
+          overflow: auto;
+          border: 1px solid rgba(0, 242, 255, 0.2);
+          border-radius: 4px;
+          background: rgba(3, 9, 16, 0.85);
+          padding: 10px;
+          color: #d5ebff;
+          white-space: pre-wrap;
+          word-break: break-word;
+          font-family: ui-monospace, monospace;
+          font-size: 12px;
+          line-height: 1.45;
+        }}
+        .review-actions {{
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+        }}
+        .prompt-stack {{
+          display: grid;
+          gap: 10px;
+        }}
+        .prompt-card {{
+          border: 1px solid rgba(0, 242, 255, 0.18);
+          border-radius: 4px;
+          background: #122131;
+          min-width: 0;
+          overflow: hidden;
+        }}
+        .prompt-card-head,
+        .prompt-card-foot {{
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 8px;
+          padding: 8px 10px;
+          border-bottom: 1px solid rgba(0, 242, 255, 0.16);
+        }}
+        .prompt-card-foot {{
+          border-top: 1px solid rgba(0, 242, 255, 0.16);
+          border-bottom: 0;
+          color: #7f99b2;
+          font-size: 10px;
+        }}
+        .prompt-card-foot > div {{
+          display: flex;
+          gap: 6px;
+        }}
+        .model-ref {{
+          color: #00f2ff;
+          font-family: 'JetBrains Mono', ui-monospace, monospace;
+          font-size: 11px;
+          letter-spacing: 0.06em;
+        }}
+        .prompt-state {{
+          border: 1px solid rgba(0, 242, 255, 0.22);
+          border-radius: 4px;
+          padding: 2px 6px;
+          color: #00ff9f;
+          font-size: 10px;
+        }}
+        .prompt-state.missing {{ color: #ffc857; border-color: rgba(255, 200, 87, 0.35); }}
+        .prompt-preview {{
+          margin: 0;
+          max-height: 150px;
+          overflow: auto;
+          padding: 10px;
+          background: #010f1f;
+          color: #c7def2;
+          white-space: pre-wrap;
+          word-break: break-word;
+          font-size: 11px;
+          line-height: 1.45;
+        }}
+        .inspector-stack {{
+          display: grid;
+          gap: 10px;
+        }}
+        .health-ring {{
+          width: 116px;
+          height: 116px;
+          border-radius: 999px;
+          margin: 0 auto;
+          display: grid;
+          place-items: center;
+          background: conic-gradient(#00f2ff {health_score}%, rgba(0,242,255,.1) 0);
+          border: 1px solid rgba(0, 242, 255, 0.3);
+        }}
+        .health-ring span {{
+          width: 84px;
+          height: 84px;
+          border-radius: 999px;
+          display: grid;
+          place-items: center;
+          background: #010f1f;
+          color: #e0f4ff;
+          font-weight: 800;
+          font-size: 20px;
+        }}
+        .context-checks {{
+          display: grid;
+          gap: 7px;
+        }}
+        .inspector-label {{
+          color: #7f99b2;
+          font-family: 'JetBrains Mono', ui-monospace, monospace;
+          font-size: 10px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          text-align: center;
+        }}
+        .context-checks div {{
+          display: flex;
+          justify-content: space-between;
+          gap: 8px;
+          border: 1px solid rgba(0, 242, 255, 0.12);
+          border-radius: 4px;
+          background: #010f1f;
+          padding: 7px 8px;
+          color: #a9c4df;
+          font-size: 11px;
+        }}
+        .context-checks strong {{ color: #00ff9f; }}
+        .metadata-grid {{
+          display: grid;
+          gap: 7px;
+        }}
+        .metadata-grid div {{
+          display: grid;
+          gap: 2px;
+          border: 1px solid rgba(0, 242, 255, 0.12);
+          border-radius: 4px;
+          background: #010f1f;
+          padding: 7px 8px;
+        }}
+        .metadata-grid span {{
+          color: #7f99b2;
+          font-size: 10px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }}
+        .metadata-grid strong {{
+          color: #dff4ff;
+          font-size: 11px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }}
+        .artifact-list {{
+          display: grid;
+          gap: 6px;
+        }}
+        .artifact-row {{
+          display: grid;
+          gap: 2px;
+          border: 1px solid rgba(0, 242, 255, 0.12);
+          border-radius: 4px;
+          background: #010f1f;
+          padding: 7px 8px;
+        }}
+        .artifact-row span {{
+          color: #dff4ff;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }}
+        .artifact-row small,
+        .artifact-empty {{
+          color: #7f99b2;
+          font-size: 10px;
+        }}
+        @media (max-width: 1350px) {{
+          .review-col-left {{ grid-column: span 4; }}
+          .review-col-center {{ grid-column: span 5; }}
+          .review-col-right {{ grid-column: span 4; }}
+          .review-output {{ min-height: 420px; }}
+        }}
+        @media (max-width: 1000px) {{
+          .settings-bar {{ grid-template-columns: 1fr; }}
+          .review-status-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+          .review-split {{ grid-template-columns: 1fr; }}
+          .review-col-left, .review-col-center, .review-col-right {{ grid-column: span 1; }}
+        }}
+      </style>
+      <section class="review-shell">
+        <article class="ov1-panel">
+          <div class="ov1-panel-body review-header">
+            <div>
+              <h2>Codex Review</h2>
+              <p>Tactical review workspace mapped to prompt generation, resource analysis, and final audit output.</p>
+            </div>
+            <span class="review-badge">Prompt Health {health_score}%</span>
+          </div>
+        </article>
+
+        <section class="review-status-grid">
+          <article class="review-status-card"><span>Incoming Resources</span><strong>{len(resources)}</strong></article>
+          <article class="review-status-card"><span>Analyzed</span><strong class="ok">{analyzed_count}</strong></article>
+          <article class="review-status-card"><span>Patch Plans</span><strong>{patch_plan_count}</strong></article>
+          <article class="review-status-card"><span>Staged Copies</span><strong>{staged_count}</strong></article>
+        </section>
+
+        <section class="settings-bar">
+          <div class="setting-field">
+            <label for="promptEngine">PROMPT_ENGINE</label>
+            <select id="promptEngine">
+              <option>OPENCODE</option>
+              <option>GEMINI</option>
+              <option>CODEX</option>
+            </select>
+          </div>
+          <div class="setting-field">
+            <label>DETAIL_LEVEL</label>
+            <div class="segmented">
+              <button class="button secondary" type="button">Brief</button>
+              <button class="button" type="button">Standard</button>
+              <button class="button secondary" type="button">Deep</button>
+            </div>
+          </div>
+          <div class="setting-field">
+            <label for="outputTone">OUTPUT_TONE</label>
+            <select id="outputTone">
+              <option>technical</option>
+              <option>audit</option>
+              <option>implementation</option>
+            </select>
+          </div>
+          <button class="button secondary" type="button" id="regenerateAllPrompts">REGENERATE_ALL</button>
+        </section>
+
+        <section class="review-split">
+          <article class="review-pane review-col-left">
+            <h3>Analyzed Files Tree</h3>
+            <div class="review-pane-body">
+              <ul class="files-tree">{tree_html}</ul>
+            </div>
+          </article>
+
+          <article class="review-pane review-col-center">
+            <h3>Generated Prompt Cards</h3>
+            <div class="review-pane-body">
+              <div class="prompt-stack">{"".join(prompt_cards)}</div>
+              <div class="review-actions">
+                <button class="button" type="button" id="loadOpenCodePrompt">Load OpenCode Prompt</button>
+                <button class="button secondary" type="button" id="loadCodexPrompt">Load Codex Audit Prompt</button>
+              </div>
+            </div>
+          </article>
+
+          <article class="review-pane review-col-right">
+            <h3>Inspector</h3>
+            <div class="review-pane-body inspector-stack">
+              <div>
+                <div class="inspector-label">PROMPT_HEALTH</div>
+                <div class="health-ring"><span>{health_score}%</span></div>
+              </div>
+              <div class="context-checks">
+                <div><span>NODE_DETAILS</span><strong>{len(resources)} nodes</strong></div>
+                <div><span>ANALYSIS_READY</span><strong>{analyzed_count}</strong></div>
+                <div><span>PATCH_CONTEXT</span><strong>{patch_plan_count}</strong></div>
+                <div><span>STAGING_CONTEXT</span><strong>{staged_count}</strong></div>
+              </div>
+              <div class="metadata-grid">
+                <div><span>METADATA_SOURCE</span><strong>orchestrator/prompts</strong></div>
+                <div><span>MODEL_REFS</span><strong>OPENCODE / GEMINI / CODEX</strong></div>
+                <div><span>ARTIFACTS</span><strong>{len(artifact_rows)} recent report(s)</strong></div>
+              </div>
+              <pre class="review-output" id="reviewOutput">Select a prompt card to load full content here.</pre>
+              <div class="review-actions">
+                <button class="button secondary" type="button" id="copyReviewOutput">Copy Output</button>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section class="review-pane">
+          <h3>Secondary Report Artifacts</h3>
+          <div class="review-pane-body artifact-list">{artifacts_html}</div>
+        </section>
       </section>
-      {_review_index_html()}
-      <section class="agent-panel">
-        <h2>Recent reports</h2>
-        <p>Latest markdown, JSON, and text reports saved under the AgentOS reports folder.</p>
-      </section>
-      {_recent_reports_html()}
     """
-    return app_view_html("Reviews", "reviews", content, subtitle="Review staged coding output before applying anything.")
+    script = """
+      <script>
+        function copyText(text) {
+          return navigator.clipboard.writeText(text);
+        }
+        async function loadPrompt(endpoint, label) {
+          const out = document.getElementById("reviewOutput");
+          if (!out) return;
+          out.textContent = "Loading " + label + "...";
+          try {
+            const response = await fetch(endpoint);
+            const body = await response.json();
+            if (!response.ok) {
+              throw new Error(body.detail || body.error || "Request failed");
+            }
+            out.textContent = body.content || ("No content returned for " + label + ".");
+          } catch (error) {
+            out.textContent = label + " load failed: " + String(error.message || error);
+          }
+        }
+        function loadInlinePrompt(targetId, label) {
+          const out = document.getElementById("reviewOutput");
+          const source = document.getElementById(targetId);
+          if (!out || !source) return;
+          out.textContent = source.textContent || ("No content returned for " + label + ".");
+        }
+        document.getElementById("loadOpenCodePrompt")?.addEventListener("click", () => loadPrompt("/api/prompts/opencode-next", "OpenCode Prompt"));
+        document.getElementById("loadCodexPrompt")?.addEventListener("click", () => loadPrompt("/api/prompts/codex-audit-next", "Codex Audit Prompt"));
+        document.getElementById("copyReviewOutput")?.addEventListener("click", () => {
+          const text = document.getElementById("reviewOutput")?.textContent || "";
+          copyText(text).then(() => alert("Output copied."));
+        });
+        document.addEventListener("click", (event) => {
+          const loadButton = event.target.closest(".load-prompt-card");
+          if (loadButton) {
+            const endpoint = loadButton.getAttribute("data-endpoint");
+            const label = loadButton.getAttribute("data-label") || "Prompt";
+            const inlineTarget = loadButton.getAttribute("data-inline-target");
+            if (endpoint) {
+              loadPrompt(endpoint, label);
+            } else if (inlineTarget) {
+              loadInlinePrompt(inlineTarget, label);
+            }
+            return;
+          }
+          const copyButton = event.target.closest(".copy-prompt-card");
+          if (copyButton) {
+            const target = document.getElementById(copyButton.getAttribute("data-target") || "");
+            copyText(target?.textContent || "").then(() => {
+              copyButton.textContent = "Copied";
+              setTimeout(() => { copyButton.textContent = "Copy"; }, 1200);
+            });
+          }
+        });
+        document.getElementById("regenerateAllPrompts")?.addEventListener("click", () => {
+          const out = document.getElementById("reviewOutput");
+          if (out) out.textContent = "Prompt regeneration requires an approved patch-plan source. No backend mutation was started from this review page.";
+        });
+      </script>
+    """
+    try:
+        from apps.shared_layout import render_cyber_layout
+        host = controller.system_agent.stats()
+        return render_cyber_layout(
+            "Codex Review",
+            "reviews",
+            content,
+            script=script,
+            topbar_stats={
+                "title": "Codex Review",
+                "cpu": f"{host.get('cpu_percent', 'n/a')}%",
+                "memory": f"{host.get('memory_percent', 'n/a')}%",
+                "active_tasks": str(len(resources)),
+                "uptime": str(host.get("uptime", "n/a")),
+            },
+        )
+    except ImportError:
+        return app_view_html("Codex Review", "reviews", content, script=script, subtitle="Tactical review workspace for prompt and report validation.")
+
+
+@app.get("/codex-review", response_class=HTMLResponse)
+def codex_review_page() -> str:
+    """Alias route for Codex Review blueprint shell."""
+    return reviews_index_page()
 
 
 @app.get("/staging/{task_id}", response_class=HTMLResponse)
@@ -8901,56 +10039,162 @@ def staging_index_page() -> str:
 
 @app.get("/upload", response_class=HTMLResponse)
 def upload_page() -> str:
-    content = f"""
-      {_upload_safety_checklist_html()}
-      <section class="upload-card">
-        <div class="upload-head">
-          <div>
-            <h2>Upload Script Pipeline</h2>
-            <p>Drop a ZIP file or script folder here. AgentOS will plan, stage, and review it without touching live FiveM resources.</p>
-          </div>
-          <span class="safety-pill">Staging only</span>
-        </div>
-        <form id="uploadForm" class="upload-form">
-          <div id="dropZone" class="drop-zone" tabindex="0">
-            <div class="drop-icon">+</div>
-            <strong>Drag files or ZIPs here</strong>
-            <span>Folders work through the folder selector in supported browsers.</span>
-          </div>
-          <div class="picker-row">
-            <label class="picker-button">Select files<input id="fileInput" name="files" type="file" multiple accept=".zip,.lua,.js,.json,.cfg,.txt,.md,.html,.css"></label>
-            <label class="picker-button">Select folder<input id="folderInput" name="files" type="file" multiple webkitdirectory directory></label>
-            <button id="uploadButton" class="primary-button" type="submit">Upload and run pipeline</button>
-          </div>
-          <div id="fileList" class="file-list">No files selected.</div>
-        </form>
-      </section>
-      <section class="progress-card">
-        <div class="step" data-step="uploaded"><span></span><div><strong>Uploaded</strong><p>Files saved under incoming.</p></div></div>
-        <div class="step" data-step="scanning"><span></span><div><strong>Scanning</strong><p>File tree, manifests, SQL, and config are inspected.</p></div></div>
-        <div class="step" data-step="planning"><span></span><div><strong>Planning</strong><p>Planner Agent analyzes framework and dependency risks.</p></div></div>
-        <div class="step" data-step="staging"><span></span><div><strong>Creating staging output</strong><p>Coding Agent creates staged changes only.</p></div></div>
-        <div class="step" data-step="reviewing"><span></span><div><strong>Reviewing</strong><p>Human-readable risk review is generated.</p></div></div>
-        <div class="step" data-step="ready"><span></span><div><strong>Ready for testing</strong><p>Plan, staging, and review links are ready.</p></div></div>
-      </section>
-      <section id="resultCard" class="result-card hidden"></section>
-      <section class="agent-panel">
-        <h2>Recent uploads and results</h2>
-        <p>Upload jobs are tracked locally under reports/upload-pipeline. The list is read-only.</p>
-      </section>
-      {_recent_upload_jobs_html()}
-      <section class="agent-panel">
-        <h2>Incoming scripts</h2>
-        <p>Raw uploaded scripts remain isolated under incoming until reviewed and staged.</p>
-      </section>
-      {_incoming_index_html()}
-      <section class="agent-panel">
-        <h2>Recent reports</h2>
-        <p>Reports from uploads and explicit AI integration checks appear here.</p>
-      </section>
-      {_recent_reports_html(8)}
+    jobs = _upload_jobs(limit=25)
+    resources = _get_incoming_resources_with_analysis(limit=24)
+    incoming_resources_json = json.dumps(resources).replace("</", "<\\/")
+
+    tag_rows: list[str] = []
+    for resource in resources[:12]:
+        analysis = resource.get("analysis") or {}
+        summary = _generate_analysis_summary(analysis) if analysis else {}
+        framework = str(summary.get("framework", "unknown")).upper()
+        inventory = str(summary.get("inventory", "none")).upper()
+        database = str(summary.get("database", "none")).upper()
+        tag_rows.append(
+            f"""
+            <div class="framework-row">
+              <span class="framework-name">{esc(resource.get("name", "resource"))}</span>
+              <div class="framework-tags">
+                <span class="tag">{esc(framework)}</span>
+                <span class="tag">{esc(inventory)}</span>
+                <span class="tag">{esc(database)}</span>
+              </div>
+            </div>
+            """
+        )
+    tag_html = "".join(tag_rows) or '<div class="framework-row"><span class="framework-name">No analyzed resources yet.</span></div>'
+
+    ready_jobs = sum(1 for job in jobs if str(job.get("status", "")).lower() in {"ready", "completed"})
+    failed_jobs = sum(1 for job in jobs if str(job.get("status", "")).lower() == "failed")
+    active_jobs = max(0, len(jobs) - ready_jobs - failed_jobs)
+
+    history_cards: list[str] = []
+    for job in jobs[:6]:
+        task_id = str(job.get("task_id", "upload"))
+        incoming_path = str(job.get("incoming_path") or job.get("tracker_path") or "")
+        history_actions = []
+        if str(job.get("plan_url", "")).startswith("/"):
+            history_actions.append(f'<a class="button secondary" href="{esc(str(job["plan_url"]))}">Plan</a>')
+        if str(job.get("review_url", "")).startswith("/"):
+            history_actions.append(f'<a class="button secondary" href="{esc(str(job["review_url"]))}">Review</a>')
+        if str(job.get("staging_url", "")).startswith("/"):
+            history_actions.append(f'<a class="button secondary" href="{esc(str(job["staging_url"]))}">Staging</a>')
+        history_cards.append(
+            f"""
+            <article class="history-card">
+              <div class="history-card-head"><strong>{esc(task_id)}</strong>{_status_pill(job.get("status"))}</div>
+              <p>{esc(len(job.get("files", [])))} file(s) · {esc(_format_timestamp(job.get("updated_at")))}</p>
+              <code>{esc(incoming_path or "reports/upload-pipeline")}</code>
+              <div class="history-actions">{''.join(history_actions) or '<span class="subtle-id">No linked artifacts</span>'}</div>
+            </article>
+            """
+        )
+    recent_history_html = "".join(history_cards) or """
+            <article class="history-card empty-history">
+              <strong>No upload history</strong>
+              <p>Completed upload pipeline runs will appear here.</p>
+            </article>
     """
-    return render_layout("Upload Pipeline", "upload", content, extra_css=_upload_page_css(), script=_upload_page_script(), subtitle="Planner to Coding to Review")
+
+    content = f"""
+      <section class="upload-workspace">
+        <article class="upload-hero">
+          <div class="upload-hero-copy">
+            <span class="pipeline-kicker">UPLOAD PIPELINE</span>
+            <h2>Drop Scripts Here</h2>
+            <p>Upload ZIP files or resource folders into isolated incoming intake. Nothing touches live FiveM resources.</p>
+          </div>
+          <span class="safety-pill">STAGING ONLY</span>
+        </article>
+
+        <section class="upload-primary">
+          <article class="drop-panel">
+            <form id="uploadForm" class="upload-form">
+              <div id="dropZone" class="drop-zone" tabindex="0">
+                <div class="drop-zone-center">
+                  <div class="drop-icon">+</div>
+                  <strong>Drop Scripts Here</strong>
+                  <span>ZIP, Lua resource files, or full resource folders for staging-only scan.</span>
+                </div>
+              </div>
+              <div class="picker-row">
+                <label class="picker-button">Browse Files<input id="fileInput" name="files" type="file" multiple accept=".zip,.lua,.js,.json,.cfg,.txt,.md,.html,.css"></label>
+                <label class="picker-button secondary-picker">Browse Folder<input id="folderInput" name="files" type="file" multiple webkitdirectory directory></label>
+                <button id="uploadButton" class="primary-button" type="submit">Submit Pipeline</button>
+              </div>
+              <div id="fileList" class="file-list">No files selected.</div>
+            </form>
+          </article>
+
+          <aside class="upload-side">
+            <section class="upload-status-grid">
+              <article class="upload-status-card"><span>Total Jobs</span><strong>{len(jobs)}</strong></article>
+              <article class="upload-status-card"><span>Active</span><strong class="warn">{active_jobs}</strong></article>
+              <article class="upload-status-card"><span>Ready</span><strong class="ok">{ready_jobs}</strong></article>
+              <article class="upload-status-card"><span>Failed</span><strong class="danger">{failed_jobs}</strong></article>
+            </section>
+            <article class="queue-card">
+              <h3>Framework Tags</h3>
+              <div class="framework-list">{tag_html}</div>
+            </article>
+          </aside>
+        </section>
+
+        {_incoming_resource_queue_html()}
+
+        <section class="pipeline-lower-grid pipeline-overview-grid">
+          <article class="progress-card">
+            <h3>Pipeline Stages</h3>
+            <div class="step-list">
+              <div class="step" data-step="uploaded"><span></span><div><strong>Uploaded</strong><p>Files saved under incoming.</p></div></div>
+              <div class="step" data-step="scanning"><span></span><div><strong>Scanning</strong><p>Manifest and risk markers are scanned.</p></div></div>
+              <div class="step" data-step="planning"><span></span><div><strong>Planning</strong><p>Planner builds safe conversion strategy.</p></div></div>
+              <div class="step" data-step="staging"><span></span><div><strong>Staging</strong><p>Coding Agent writes staged output only.</p></div></div>
+              <div class="step" data-step="reviewing"><span></span><div><strong>Reviewing</strong><p>Readable report and guard checks generated.</p></div></div>
+              <div class="step" data-step="ready"><span></span><div><strong>Ready</strong><p>Plan/review/staging links available.</p></div></div>
+            </div>
+          </article>
+        </section>
+
+        <section id="resultCard" class="result-card hidden"></section>
+
+        <section class="history-section">
+          <div class="section-title-row">
+            <h3>Recent History</h3>
+            <span>{len(jobs)} tracked run(s)</span>
+          </div>
+          <div class="history-grid">{recent_history_html}</div>
+        </section>
+        {_document_modal_html()}
+      </section>
+    """
+    try:
+        from apps.shared_layout import render_cyber_layout
+        host = controller.system_agent.stats()
+        topbar_stats = {
+            "title": "Upload Pipeline",
+            "cpu": f"{host.get('cpu_percent', 'n/a')}%",
+            "memory": f"{host.get('memory_percent', 'n/a')}%",
+            "active_tasks": str(len(_upload_jobs(20))),
+            "uptime": str(host.get("uptime", "n/a")),
+        }
+        return render_cyber_layout(
+            "Upload Pipeline",
+            "upload",
+            content,
+            extra_css=_upload_page_css() + _incoming_resource_queue_css(),
+            script=_upload_page_script() + _incoming_resource_queue_js(incoming_resources_json),
+            topbar_stats=topbar_stats,
+        )
+    except ImportError:
+        return render_layout(
+            "Upload Pipeline",
+            "upload",
+            content,
+            extra_css=_upload_page_css() + _incoming_resource_queue_css(),
+            script=_upload_page_script() + _incoming_resource_queue_js(incoming_resources_json),
+            subtitle="Planner to Coding to Review",
+        )
 
 
 @app.post("/upload")
@@ -9036,9 +10280,157 @@ def upload_pipeline_status(task_id: str) -> dict[str, Any]:
 
 def _upload_page_css() -> str:
     return """
+      .upload-workspace{
+        display:flex;
+        flex-direction:column;
+        gap:14px;
+        min-width:0;
+      }
+      .upload-hero{
+        display:flex;
+        justify-content:space-between;
+        gap:16px;
+        align-items:flex-start;
+        border:1px solid rgba(0,242,255,.2);
+        border-radius:4px;
+        background:#0d1c2d;
+        padding:16px 18px;
+      }
+      .pipeline-kicker{display:block;margin-bottom:5px;color:#00f2ff;font-size:11px;font-family:'JetBrains Mono',ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}
+      .upload-hero h2{margin:0 0 6px;font-size:22px;letter-spacing:.02em;color:#dff4ff}
+      .upload-hero p{max-width:720px;margin:0;color:#9eb9d4;font-size:13px;line-height:1.45}
+      .upload-primary{
+        display:grid;
+        grid-template-columns:minmax(0,1fr) 360px;
+        gap:14px;
+        min-width:0;
+      }
+      .drop-panel,.upload-side{min-width:0}
+      .drop-panel{
+        border:1px solid rgba(0,242,255,.2);
+        border-radius:4px;
+        background:#0d1c2d;
+      }
+      .upload-side{display:flex;flex-direction:column;gap:10px}
+      .upload-side .upload-status-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .upload-status-grid{
+        display:grid;
+        grid-template-columns:repeat(4,minmax(0,1fr));
+        gap:10px;
+        min-width:0;
+      }
+      .upload-status-card{
+        border:1px solid rgba(0,242,255,.18);
+        border-radius:4px;
+        background:#122131;
+        padding:10px;
+        min-width:0;
+      }
+      .upload-status-card span{
+        display:block;
+        color:#8da8c4;
+        font-size:10px;
+        letter-spacing:.08em;
+        text-transform:uppercase;
+        margin-bottom:4px;
+      }
+      .upload-status-card strong{font-size:15px;color:#e7f4ff}
+      .upload-status-card .ok{color:#00ff9f}
+      .upload-status-card .warn{color:#ffc857}
+      .upload-status-card .danger{color:#ff5f7a}
+      .pipeline-lower-grid{
+        display:grid;
+        grid-template-columns:repeat(12,minmax(0,1fr));
+        gap:14px;
+        min-width:0;
+      }
+      .processing-queue{grid-column:span 8}
+      .progress-card{grid-column:span 4}
+      .pipeline-overview-grid .progress-card{grid-column:1 / -1}
+      .processing-queue,.progress-card{min-width:0}
+      .queue-card{
+        border:1px solid rgba(0,242,255,.2);
+        border-radius:4px;
+        background:#0d1c2d;
+        padding:12px;
+        min-width:0;
+      }
+      .queue-card h3{
+        margin:0 0 8px;
+        color:#93f7ff;
+        font-size:12px;
+        letter-spacing:.08em;
+        text-transform:uppercase;
+      }
+      .queue-table{
+        width:100%;
+        border-collapse:collapse;
+        font-size:11px;
+        table-layout: fixed;
+      }
+      .queue-table th,.queue-table td{
+        border:1px solid rgba(0,242,255,.14);
+        padding:9px 10px;
+        text-align:left;
+        vertical-align:top;
+        overflow-wrap:anywhere;
+      }
+      .queue-table th{
+        color:#9cf8ff;
+        background:rgba(0,242,255,.1);
+        font-size:10px;
+        letter-spacing:.08em;
+        text-transform:uppercase;
+      }
+      .queue-file{display:block;color:#e0f4ff;font-weight:700}
+      .queue-table small{display:block;margin-top:2px;color:#7f99b2;font-size:10px}
+      .queue-analysis{margin-top:6px;font-size:10px;color:#7f99b2}
+      .queue-pill{
+        display:inline-flex;
+        border:1px solid rgba(0,242,255,.25);
+        border-radius:4px;
+        padding:2px 6px;
+        font-size:10px;
+        font-weight:700;
+      }
+      .queue-pill.ready,.queue-pill.completed{color:#00ff9f;border-color:rgba(0,255,159,.35);background:rgba(0,255,159,.12)}
+      .queue-pill.failed{color:#ff5f7a;border-color:rgba(255,95,122,.35);background:rgba(255,95,122,.12)}
+      .queue-pill.scanning,.queue-pill.planning,.queue-pill.staging,.queue-pill.reviewing,.queue-pill.uploaded{color:#00f2ff;background:rgba(0,242,255,.12)}
+      .queue-pill.running{color:#00f2ff;background:rgba(0,242,255,.12)}
+      .queue-pill.analyzed,.queue-pill.patch_ready,.queue-pill.staged,.queue-pill.approved{color:#00ff9f;background:rgba(0,255,159,.12);border-color:rgba(0,255,159,.35)}
+      .queue-pill.pending_scan{color:#ffc857;background:rgba(255,200,87,.12);border-color:rgba(255,200,87,.35)}
+      .queue-actions{display:flex;flex-wrap:wrap;gap:4px}
+      .framework-list{display:flex;flex-direction:column;gap:6px;max-height:240px;overflow:auto}
+      .framework-row{
+        display:flex;
+        justify-content:space-between;
+        gap:8px;
+        border:1px solid rgba(0,242,255,.14);
+        border-radius:4px;
+        padding:6px 8px;
+        background:rgba(3,10,19,.72);
+      }
+      .framework-name{
+        color:#d8eeff;
+        font-family:ui-monospace,monospace;
+        min-width:0;
+        overflow:hidden;
+        text-overflow:ellipsis;
+        white-space:nowrap;
+      }
+      .framework-tags{display:flex;flex-wrap:wrap;gap:4px}
+      .framework-tags .tag{
+        border:1px solid rgba(0,242,255,.22);
+        border-radius:4px;
+        padding:2px 6px;
+        color:#94f8ff;
+        background:rgba(0,242,255,.1);
+        font-size:10px;
+        letter-spacing:.04em;
+      }
       .safety-checklist{
         border:1px solid var(--ao-border);
-        border-radius:8px;
+        border-radius:4px;
         background:var(--ao-panel);
         box-shadow:0 18px 42px rgba(0,0,0,.22);
         margin-bottom:18px;
@@ -9048,14 +10440,14 @@ def _upload_page_css() -> str:
       .safety-head h2{margin:0 0 6px;font-size:19px}
       .safety-head p{margin:0;color:var(--ao-muted);line-height:1.5}
       .safety-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:16px}
-      .status-row{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:start;border:1px solid rgba(125,211,252,.16);border-radius:8px;padding:10px;background:rgba(2,6,23,.28)}
+      .status-row{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:start;border:1px solid rgba(125,211,252,.16);border-radius:4px;padding:10px;background:rgba(2,6,23,.28)}
       .status-row>span{width:12px;height:12px;margin-top:4px;border-radius:999px;background:#37d67a;box-shadow:0 0 14px rgba(55,214,122,.28)}
       .status-row.warn>span{background:#fbbf24;box-shadow:0 0 14px rgba(251,191,36,.22)}
       .status-row strong{display:block;color:var(--ao-text);font-size:13px}
       .status-row small{display:block;margin-top:2px;color:var(--ao-muted);line-height:1.4}
       .upload-card,.progress-card,.result-card{
         border:1px solid var(--ao-border);
-        border-radius:8px;
+        border-radius:4px;
         background:var(--ao-panel);
         box-shadow:0 18px 42px rgba(0,0,0,.22);
         margin-bottom:18px;
@@ -9064,25 +10456,28 @@ def _upload_page_css() -> str:
       .upload-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;padding:20px;border-bottom:1px solid var(--ao-border)}
       .upload-head h2{margin:0 0 6px;font-size:20px}
       .upload-head p{margin:0;color:var(--ao-muted);line-height:1.5}
-      .safety-pill{white-space:nowrap;border:1px solid rgba(94,234,212,.35);border-radius:999px;color:#5eead4;background:rgba(20,184,166,.1);padding:6px 10px;font-size:12px;font-weight:800}
+      .safety-pill{white-space:nowrap;border:1px solid rgba(0,219,231,.45);border-radius:4px;color:#00f2ff;background:rgba(0,219,231,.1);padding:6px 10px;font-size:12px;font-weight:800}
       .upload-form{padding:18px}
-      .drop-zone{min-height:220px;border:2px dashed rgba(125,211,252,.35);border-radius:8px;background:rgba(5,12,24,.5);display:grid;place-items:center;text-align:center;gap:8px;padding:24px;color:var(--ao-muted);cursor:pointer;transition:border-color .16s,background .16s}
-      .drop-zone strong{display:block;color:var(--ao-text);font-size:19px}
+      .drop-zone{min-height:320px;border:2px dashed rgba(0,242,255,.5);border-radius:4px;background:rgba(18,33,49,.72);display:grid;place-items:center;text-align:center;gap:10px;padding:28px;color:var(--ao-muted);cursor:pointer;transition:border-color .16s,background .16s}
+      .drop-zone-center{display:grid;place-items:center;gap:10px}
+      .drop-zone strong{display:block;color:var(--ao-text);font-size:22px;line-height:1.2}
       .drop-zone.dragging{border-color:#5eead4;background:rgba(20,184,166,.12)}
-      .drop-icon{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;border:1px solid rgba(125,211,252,.35);color:#9fdcff;font-size:26px;font-weight:300;margin:auto}
+      .drop-icon{width:56px;height:56px;border-radius:4px;display:grid;place-items:center;border:1px solid rgba(0,242,255,.45);color:#9fdcff;font-size:30px;font-weight:500;margin:auto;background:rgba(0,242,255,.08)}
       .picker-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;align-items:center}
-      .picker-button,.primary-button,.result-card a{display:inline-flex;align-items:center;min-height:38px;border-radius:8px;border:1px solid rgba(125,211,252,.28);background:#10243a;color:#edf5ff;text-decoration:none;padding:8px 12px;font-weight:800;cursor:pointer}
+      .picker-button,.primary-button,.result-card a{display:inline-flex;align-items:center;min-height:38px;border-radius:4px;border:1px solid rgba(0,242,255,.28);background:#122131;color:#edf5ff;text-decoration:none;padding:8px 12px;font-weight:800;cursor:pointer}
       .picker-button input{display:none}
-      .primary-button{background:#1d4ed8;border-color:#60a5fa}
+      .primary-button{background:rgba(0,219,231,.16);border-color:#00dbe7;color:#eaffff}
       .primary-button:disabled{opacity:.55;cursor:not-allowed}
       .file-list{margin-top:14px;color:var(--ao-muted);line-height:1.55;overflow-wrap:anywhere}
-      .progress-card{padding:16px;display:grid;gap:10px}
-      .step{display:flex;gap:12px;align-items:flex-start;border:1px solid rgba(125,211,252,.14);border-radius:8px;padding:12px;background:rgba(5,12,24,.35)}
+      .progress-card{padding:12px;display:grid;gap:10px}
+      .progress-card h3{margin:0;color:#93f7ff;font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+      .step-list{display:grid;gap:8px}
+      .step{display:flex;gap:12px;align-items:flex-start;border:1px solid rgba(125,211,252,.14);border-radius:4px;padding:12px;background:rgba(5,12,24,.35)}
       .step span{width:24px;height:24px;border-radius:50%;border:1px solid rgba(125,211,252,.35);display:grid;place-items:center;color:var(--ao-muted);flex:0 0 auto}
       .step span::after{content:"";width:8px;height:8px;border-radius:50%;background:rgba(125,211,252,.35)}
       .step p{margin:3px 0 0;color:var(--ao-muted)}
       .step.done span{background:rgba(20,184,166,.16);border-color:rgba(94,234,212,.45);color:#5eead4}
-      .step.done span::after{content:"✓";width:auto;height:auto;background:transparent;font-size:13px;font-weight:900}
+      .step.done span::after{content:"OK";width:auto;height:auto;background:transparent;font-size:9px;font-weight:900}
       .step.active span{border-color:#fbbf24}
       .step.active span::after{background:#fbbf24}
       .step.failed span{border-color:#fb7185}
@@ -9092,7 +10487,7 @@ def _upload_page_css() -> str:
       .result-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
       .ai-check-button{font:inherit}
       .hidden{display:none}
-      .incoming-card .analysis-summary{margin:10px 0;padding:8px;border:1px solid var(--ao-border);border-radius:6px;background:rgba(2,6,23,.3)}
+      .incoming-card .analysis-summary{margin:10px 0;padding:8px;border:1px solid var(--ao-border);border-radius:4px;background:rgba(2,6,23,.3)}
       .analysis-result{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
       .analysis-badge{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;background:rgba(0,212,255,.12);color:var(--ao-cyan);border:1px solid rgba(0,212,255,.2)}
       .analysis-badge.framework{background:rgba(167,139,250,.12);color:#a78bfa;border-color:rgba(167,139,250,.2)}
@@ -9103,7 +10498,40 @@ def _upload_page_css() -> str:
       .analysis-action{font-size:12px;color:var(--ao-muted)}
       .analysis-error{color:var(--ao-danger);font-size:12px}
       .analyze-button{font:inherit;background:rgba(0,212,255,.15);border-color:rgba(0,212,255,.3)}
-      @media (max-width: 700px){.upload-head,.safety-head{display:block}.safety-pill{display:inline-flex;margin-top:12px}.picker-row>*{width:100%;justify-content:center}.safety-grid{grid-template-columns:1fr}}
+      .history-section{
+        border:1px solid rgba(0,242,255,.2);
+        border-radius:4px;
+        background:#0d1c2d;
+        padding:12px;
+      }
+      .section-title-row{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:10px}
+      .section-title-row h3{margin:0;color:#93f7ff;font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+      .section-title-row span{color:#7f99b2;font-size:11px}
+      .history-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+      .history-card{border:1px solid rgba(0,242,255,.16);border-radius:4px;background:#122131;padding:10px;min-width:0}
+      .history-card-head{display:flex;justify-content:space-between;gap:8px;align-items:flex-start;margin-bottom:6px}
+      .history-card .status-pill{display:inline-flex;border:1px solid rgba(0,242,255,.22);border-radius:4px;padding:2px 6px;color:#7f99b2;background:#010f1f;font-size:10px;font-weight:800;white-space:nowrap}
+      .history-card .status-pill.ok{color:#00ff9f;border-color:rgba(0,255,159,.35);background:rgba(0,255,159,.12)}
+      .history-card .status-pill.warn{color:#ffc857;border-color:rgba(255,200,87,.35);background:rgba(255,200,87,.12)}
+      .history-card .status-pill.danger{color:#ff5f7a;border-color:rgba(255,95,122,.35);background:rgba(255,95,122,.12)}
+      .history-card strong{color:#e0f4ff;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .history-card p{margin:0 0 6px;color:#9eb9d4;font-size:11px}
+      .history-card code{display:block;color:#7f99b2;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .history-actions{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+      @media (max-width:1350px){
+        .upload-primary{grid-template-columns:minmax(0,1fr) 320px}
+        .processing-queue{grid-column:span 7}
+        .progress-card{grid-column:span 5}
+        .drop-zone{min-height:280px}
+      }
+      @media (max-width:1100px){
+        .upload-primary{grid-template-columns:1fr}
+        .upload-status-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+        .pipeline-lower-grid{grid-template-columns:1fr}
+        .processing-queue,.progress-card{grid-column:span 1}
+        .history-grid{grid-template-columns:1fr}
+      }
+      @media (max-width: 700px){.upload-header,.upload-head,.safety-head{display:block}.safety-pill{display:inline-flex;margin-top:12px}.picker-row>*{width:100%;justify-content:center}.safety-grid{grid-template-columns:1fr}}
     """
 
 
